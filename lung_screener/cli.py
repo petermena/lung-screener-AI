@@ -95,11 +95,18 @@ def predict(ctx, input_path, model, output, output_format):
 
     INPUT_PATH can be a directory of DICOM files or a .mhd file.
     """
-    from .inference import NoduleDetector
     from .preprocessing import load_dicom_series, load_mhd
 
     config = ctx.obj["config"]
-    detector = NoduleDetector(config, model_path=model)
+    model_path = Path(model)
+
+    # Use ONNX runtime if model is .onnx, otherwise use PyTorch
+    if model_path.suffix == ".onnx":
+        from .inference_onnx import NoduleDetectorONNX
+        detector = NoduleDetectorONNX(config, onnx_path=model_path)
+    else:
+        from .inference import NoduleDetector
+        detector = NoduleDetector(config, model_path=model_path)
 
     input_path = Path(input_path)
 
@@ -140,7 +147,6 @@ def serve(ctx, model, port):
     The server listens for incoming CT studies, runs nodule detection,
     and sends DICOM Structured Reports back to the configured PACS.
     """
-    from .inference import NoduleDetector
     from .pacs import DicomStorageSCP
 
     config = ctx.obj["config"]
@@ -148,7 +154,13 @@ def serve(ctx, model, port):
     if port:
         config.setdefault("pacs", {})["local_port"] = port
 
-    detector = NoduleDetector(config, model_path=model)
+    model_path = Path(model)
+    if model_path.suffix == ".onnx":
+        from .inference_onnx import NoduleDetectorONNX
+        detector = NoduleDetectorONNX(config, onnx_path=model_path)
+    else:
+        from .inference import NoduleDetector
+        detector = NoduleDetector(config, model_path=model_path)
 
     def on_result(result):
         click.echo(result.summary())
@@ -160,6 +172,24 @@ def serve(ctx, model, port):
     except KeyboardInterrupt:
         click.echo("\nShutting down...")
         scp.stop()
+
+
+@main.command(name="export")
+@click.option("--checkpoint", type=click.Path(exists=True), required=True, help="Trained .pth checkpoint")
+@click.option("--output", "-o", default="./model.onnx", help="Output ONNX file path")
+@click.pass_context
+def export_model(ctx, checkpoint, output):
+    """Export trained model to ONNX for lightweight offline deployment.
+
+    The ONNX model can run without PyTorch installed (~50MB vs ~2GB),
+    making it ideal for distributing to workstations.
+    """
+    from .export import export_to_onnx
+
+    config = ctx.obj["config"]
+    path = export_to_onnx(checkpoint, output, config)
+    click.echo(f"Model exported to {path}")
+    click.echo("Use with: lung-screener predict /path/to/scan -m model.onnx")
 
 
 @main.command()

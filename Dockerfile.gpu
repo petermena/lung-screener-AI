@@ -1,0 +1,45 @@
+# Lung Screener AI - GPU Docker Image (full PyTorch)
+#
+# For machines with NVIDIA GPUs. Larger image but faster inference.
+#
+# Build:
+#   docker build -f Dockerfile.gpu -t lung-screener-gpu --build-arg MODEL_PATH=./checkpoints/best.pth .
+#
+# Run with GPU:
+#   docker run --gpus all -d -p 11112:11112 lung-screener-gpu serve -m /app/model/model.pth
+
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml .
+RUN pip install --no-cache-dir \
+    pydicom>=2.4 \
+    pynetdicom>=2.0 \
+    numpy>=1.24 \
+    scipy>=1.10 \
+    scikit-image>=0.21 \
+    SimpleITK>=2.3 \
+    pyyaml>=6.0 \
+    click>=8.1
+
+COPY lung_screener/ lung_screener/
+COPY config/ config/
+
+RUN pip install --no-cache-dir -e .
+
+# Copy trained model
+ARG MODEL_PATH=./checkpoints/best.pth
+RUN mkdir -p /app/model
+COPY ${MODEL_PATH} /app/model/model.pth
+
+EXPOSE 11112
+
+ENTRYPOINT ["lung-screener"]
+CMD ["--help"]
