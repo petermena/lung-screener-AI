@@ -26,6 +26,7 @@ from pynetdicom.sop_class import (
     Verification,
 )
 
+from .annotations import create_annotated_slices, create_gsps
 from .inference import NoduleDetector, ScanResult
 from .preprocessing import load_dicom_series
 
@@ -135,18 +136,22 @@ class DicomStorageSCP:
             logger.error(f"Error processing series {series_uid}: {e}")
 
     def _send_results(self, result: ScanResult, series_dir: Path):
-        """Generate DICOM SR and send back to PACS."""
-        # Read a reference DICOM for patient/study info
+        """Generate DICOM SR, annotated images, and GSPS, then send to PACS."""
         ref_files = list(series_dir.glob("*.dcm"))
         if not ref_files:
             return
 
         ref_ds = pydicom.dcmread(ref_files[0])
 
-        # Create SR
-        sr = create_nodule_sr(result, ref_ds)
+        # Read all DICOM slices for annotation rendering
+        all_slices = [pydicom.dcmread(f) for f in ref_files]
 
-        # Send to PACS
+        # Create all result objects
+        sr = create_nodule_sr(result, ref_ds)
+        annotated_sc = create_annotated_slices(result, all_slices)
+        gsps_list = create_gsps(result, all_slices)
+
+        # Send everything to PACS
         pacs_config = self.config.get("pacs", {})
         sender = DicomSender(
             local_ae=self.ae_title,
@@ -154,7 +159,12 @@ class DicomStorageSCP:
             remote_host=pacs_config.get("remote_host", "localhost"),
             remote_port=pacs_config.get("remote_port", 4006),
         )
+
         sender.send_dataset(sr)
+        for sc in annotated_sc:
+            sender.send_dataset(sc)
+        for gsps in gsps_list:
+            sender.send_dataset(gsps)
 
     def start(self):
         """Start the DICOM SCP server."""
@@ -195,6 +205,9 @@ class DicomSender:
     def send_dataset(self, dataset: Dataset) -> bool:
         """Send a DICOM dataset to the remote PACS.
 
+        Automatically negotiates the correct presentation context based on
+        the dataset's SOPClassUID (SR, Secondary Capture, GSPS, etc.).
+
         Args:
             dataset: pydicom Dataset to send.
 
@@ -202,7 +215,10 @@ class DicomSender:
             True if send was successful.
         """
         ae = AE(ae_title=self.local_ae)
-        ae.add_requested_context(ComprehensiveSRStorage)
+
+        # Add the presentation context matching this dataset's SOP Class
+        sop_class = str(dataset.SOPClassUID)
+        ae.add_requested_context(sop_class)
 
         assoc = ae.associate(
             self.remote_host,
@@ -214,11 +230,12 @@ class DicomSender:
             status = assoc.send_c_store(dataset)
             assoc.release()
 
+            modality = getattr(dataset, "Modality", "??")
             if status and status.Status == 0x0000:
-                logger.info("Successfully sent SR to PACS")
+                logger.info(f"Successfully sent {modality} to PACS")
                 return True
             else:
-                logger.error(f"Failed to send SR to PACS: {status}")
+                logger.error(f"Failed to send {modality} to PACS: {status}")
                 return False
         else:
             logger.error(
