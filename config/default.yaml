@@ -70,9 +70,11 @@ pacs:
   result_format: "SR"
 
 data:
-  # Path to LUNA16 / LIDC-IDRI dataset
+  # Path to LUNA16 / LIDC-IDRI dataset (or prepared training data)
   dataset_dir: "./data/luna16"
   # Preprocessed data cache
   cache_dir: "./data/cache"
   # Train/val split ratio
   val_split: 0.2
+  # Directory for manually imported DICOM scans & annotations
+  training_dir: "./data/training"

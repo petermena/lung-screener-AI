@@ -192,6 +192,127 @@ def export_model(ctx, checkpoint, output):
     click.echo("Use with: lung-screener predict /path/to/scan -m model.onnx")
 
 
+@main.group()
+@click.option("--data-dir", default="./data/training", help="Training data directory")
+@click.pass_context
+def data(ctx, data_dir):
+    """Manage training data: import DICOM scans, annotate, and prepare."""
+    from .data_manager import DataManager
+
+    ctx.ensure_object(dict)
+    ctx.obj["data_manager"] = DataManager(data_dir, ctx.obj["config"])
+
+
+@data.command(name="import")
+@click.argument("dicom_dir", type=click.Path(exists=True))
+@click.option("--label", "-l", default="", help="Human-readable label for this scan")
+@click.pass_context
+def data_import(ctx, dicom_dir, label):
+    """Import a DICOM series directory into the training dataset.
+
+    DICOM_DIR should contain the .dcm files for a single CT series.
+    The scan will be converted to MHD format and registered for annotation.
+
+    Example:
+
+        lung-screener data import /path/to/patient_042/CT_series/
+    """
+    dm = ctx.obj["data_manager"]
+    scan = dm.import_dicom(dicom_dir, label=label)
+    click.echo(f"Imported: {scan['series_uid']}")
+    click.echo(f"  Patient: {scan['patient_id']}")
+    click.echo(f"  Slices:  {scan['num_slices']}")
+    click.echo(f"  Status:  {scan['status']}")
+    click.echo("")
+    click.echo("Next steps:")
+    click.echo(f"  1. Annotate nodules:  lung-screener data annotate {scan['series_uid']} --x 10.0 --y 20.0 --z -150.0 --diameter 8.5")
+    click.echo(f"  2. Or mark negative:  lung-screener data mark-negative {scan['series_uid']}")
+
+
+@data.command(name="annotate")
+@click.argument("series_uid")
+@click.option("--x", type=float, required=True, help="X coordinate in mm")
+@click.option("--y", type=float, required=True, help="Y coordinate in mm")
+@click.option("--z", type=float, required=True, help="Z coordinate in mm (slice position)")
+@click.option("--diameter", "-d", type=float, required=True, help="Nodule diameter in mm")
+@click.option("--note", "-n", default="", help="Optional clinical note")
+@click.pass_context
+def data_annotate(ctx, series_uid, x, y, z, diameter, note):
+    """Add a nodule annotation to an imported scan.
+
+    Coordinates should be in world mm — the same values shown by your
+    DICOM viewer when you hover over the nodule.
+
+    Example:
+
+        lung-screener data annotate 1.3.6.1.4... --x -42.3 --y 118.7 --z -205.1 --diameter 8.5
+    """
+    dm = ctx.obj["data_manager"]
+    dm.annotate(series_uid, x, y, z, diameter, note=note)
+    click.echo(f"Annotation added: ({x}, {y}, {z}) mm, {diameter}mm diameter")
+
+
+@data.command(name="mark-negative")
+@click.argument("series_uid")
+@click.pass_context
+def data_mark_negative(ctx, series_uid):
+    """Mark a scan as having no nodules (negative training case)."""
+    dm = ctx.obj["data_manager"]
+    dm.mark_negative(series_uid)
+    click.echo(f"Marked {series_uid} as negative (no nodules)")
+
+
+@data.command(name="list")
+@click.pass_context
+def data_list(ctx):
+    """List all imported scans and their annotation status."""
+    dm = ctx.obj["data_manager"]
+    scans = dm.list_scans()
+
+    if not scans:
+        click.echo("No scans imported yet.")
+        click.echo("Import with: lung-screener data import /path/to/dicom/")
+        return
+
+    click.echo(f"{'Series UID':<45} {'Label':<15} {'Slices':>6} {'Annotations':>12} {'Status':<12}")
+    click.echo("-" * 95)
+    for s in scans:
+        uid_short = s['series_uid'][:42] + "..." if len(s['series_uid']) > 45 else s['series_uid']
+        click.echo(
+            f"{uid_short:<45} {s['label']:<15} {s['num_slices']:>6} "
+            f"{s['num_annotations']:>12} {s['status']:<12}"
+        )
+
+    click.echo("")
+    total = len(scans)
+    ready = sum(1 for s in scans if s["status"] in ("annotated", "negative"))
+    click.echo(f"Total: {total} scans, {ready} ready for training")
+
+
+@data.command(name="prepare")
+@click.option("--output-dir", "-o", default=None, help="Output directory (default: data_dir/prepared)")
+@click.pass_context
+def data_prepare(ctx, output_dir):
+    """Compile annotations into training-ready CSV files.
+
+    Generates annotations.csv + candidates_V2.csv from your imported and
+    annotated scans. The output directory can be passed directly to the
+    train command via config override.
+
+    Example:
+
+        lung-screener data prepare
+        lung-screener train --dataset-dir ./data/training/prepared
+    """
+    dm = ctx.obj["data_manager"]
+    result_dir = dm.prepare(output_dir)
+    click.echo("")
+    click.echo(f"Training data ready at: {result_dir}")
+    click.echo("")
+    click.echo("To train:")
+    click.echo(f"  lung-screener train  (set data.dataset_dir to {result_dir} in config)")
+
+
 @main.command()
 @click.pass_context
 def verify(ctx):
