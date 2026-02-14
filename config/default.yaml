@@ -1,0 +1,78 @@
+# Lung Screener AI - Default Configuration
+
+model:
+  # Architecture: "resnet3d" or "densenet3d"
+  architecture: "resnet3d"
+  # Number of input channels (1 for CT grayscale)
+  in_channels: 1
+  # Number of output classes: [non-nodule, nodule]
+  num_classes: 2
+  # Candidate patch size in voxels (z, y, x)
+  patch_size: [48, 48, 48]
+
+preprocessing:
+  # Resample all scans to this spacing in mm (z, y, x)
+  target_spacing: [1.0, 1.0, 1.0]
+  # Hounsfield Unit window for lung tissue
+  hu_window:
+    min: -1200
+    max: 600
+  # Clip and normalize to [0, 1]
+  normalize: true
+
+candidate_detection:
+  # Threshold for initial candidate detection (HU value)
+  lung_threshold: -400
+  # Minimum candidate size in mm
+  min_size_mm: 3.0
+  # Maximum candidate size in mm
+  max_size_mm: 30.0
+
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epochs: 100
+  # Positive/negative ratio for sampling
+  pos_neg_ratio: 1.0
+  # Data augmentation
+  augmentation:
+    rotation: true
+    flip: true
+    scale_range: [0.9, 1.1]
+    noise_std: 0.01
+  # Early stopping patience (epochs)
+  early_stopping_patience: 15
+  # Learning rate scheduler
+  scheduler:
+    type: "cosine"
+    warmup_epochs: 5
+
+inference:
+  # Classification threshold for nodule detection
+  threshold: 0.5
+  # Non-maximum suppression distance in mm
+  nms_distance_mm: 10.0
+  # Batch size for inference
+  batch_size: 64
+
+pacs:
+  # DICOM Application Entity settings
+  local_ae_title: "LUNG_SCREEN_AI"
+  local_port: 11112
+  # GE Centricity PACS connection
+  remote_ae_title: "GEPACS"
+  remote_host: "192.168.1.100"
+  remote_port: 4006
+  # Store incoming studies here
+  storage_dir: "./data/incoming"
+  # Send results as DICOM Structured Report
+  result_format: "SR"
+
+data:
+  # Path to LUNA16 / LIDC-IDRI dataset
+  dataset_dir: "./data/luna16"
+  # Preprocessed data cache
+  cache_dir: "./data/cache"
+  # Train/val split ratio
+  val_split: 0.2
