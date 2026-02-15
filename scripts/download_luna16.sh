@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Download LUNA16 dataset from Zenodo
+# Run this on a machine with unrestricted internet (e.g., RunPod)
+#
+# Usage:
+#   ./scripts/download_luna16.sh              # Download all subsets (~100GB)
+#   ./scripts/download_luna16.sh 0 1          # Download only subset0 and subset1
+#
+# Source: https://zenodo.org/records/3723295 (Part 1)
+#         https://zenodo.org/records/4121926 (Part 2)
+
+set -euo pipefail
+
+DATA_DIR="./data/luna16"
+mkdir -p "$DATA_DIR"
+
+# Zenodo base URLs
+ZENODO_PART1="https://zenodo.org/records/3723295/files"
+ZENODO_PART2="https://zenodo.org/records/4121926/files"
+
+# Download a file with retry logic
+download_file() {
+    local url="$1"
+    local output="$2"
+    local max_retries=3
+
+    if [ -f "$output" ]; then
+        echo "  Already exists: $output (skipping)"
+        return 0
+    fi
+
+    echo "  Downloading: $(basename "$output")"
+    for attempt in $(seq 1 $max_retries); do
+        if curl -L -C - --progress-bar -o "$output" "${url}?download=1"; then
+            return 0
+        fi
+        echo "  Retry $attempt/$max_retries..."
+        sleep $((attempt * 2))
+    done
+
+    echo "  FAILED: $output"
+    return 1
+}
+
+# --- Annotation files (small, always download) ---
+echo "=== Downloading annotation files ==="
+download_file "$ZENODO_PART1/annotations.csv" "$DATA_DIR/annotations.csv"
+download_file "$ZENODO_PART1/candidates_V2.csv" "$DATA_DIR/candidates_V2.csv"
+download_file "$ZENODO_PART1/sampleSubmission.csv" "$DATA_DIR/sampleSubmission.csv"
+
+# --- CT scan subsets ---
+# Determine which subsets to download
+if [ $# -gt 0 ]; then
+    SUBSETS=("$@")
+    echo "=== Downloading selected subsets: ${SUBSETS[*]} ==="
+else
+    SUBSETS=(0 1 2 3 4 5 6 7 8 9)
+    echo "=== Downloading all 10 subsets (~100GB total) ==="
+fi
+
+for i in "${SUBSETS[@]}"; do
+    echo ""
+    echo "--- Subset $i ---"
+
+    # Subsets 0-4 are in Part 1, subsets 5-9 are in Part 2
+    if [ "$i" -le 4 ]; then
+        BASE_URL="$ZENODO_PART1"
+    else
+        BASE_URL="$ZENODO_PART2"
+    fi
+
+    ZIP_FILE="$DATA_DIR/subset${i}.zip"
+    SUBSET_DIR="$DATA_DIR/subset${i}"
+
+    # Download
+    download_file "$BASE_URL/subset${i}.zip" "$ZIP_FILE"
+
+    # Extract
+    if [ -d "$SUBSET_DIR" ] && [ "$(ls -A "$SUBSET_DIR" 2>/dev/null)" ]; then
+        echo "  Already extracted: $SUBSET_DIR (skipping)"
+    else
+        echo "  Extracting subset${i}.zip..."
+        unzip -q -o "$ZIP_FILE" -d "$DATA_DIR"
+        echo "  Done."
+    fi
+
+    # Remove zip to save space (optional — comment out to keep zips)
+    if [ -d "$SUBSET_DIR" ] && [ "$(ls -A "$SUBSET_DIR" 2>/dev/null)" ]; then
+        echo "  Removing zip to save disk space..."
+        rm -f "$ZIP_FILE"
+    fi
+done
+
+echo ""
+echo "=== Download complete ==="
+echo ""
+echo "Dataset structure:"
+ls -la "$DATA_DIR/"
+echo ""
+echo "Annotation stats:"
+if [ -f "$DATA_DIR/annotations.csv" ]; then
+    echo "  Annotations: $(wc -l < "$DATA_DIR/annotations.csv") lines"
+fi
+if [ -f "$DATA_DIR/candidates_V2.csv" ]; then
+    echo "  Candidates:  $(wc -l < "$DATA_DIR/candidates_V2.csv") lines"
+fi
+echo ""
+echo "Ready to train:"
+echo "  lung-screener train --checkpoint-dir ./checkpoints"
