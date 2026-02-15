@@ -181,17 +181,44 @@ def get_report(series_uid: str):
     if series_uid not in _dm.manifest["scans"]:
         raise HTTPException(404, "Scan not found")
 
-    from .inference import NoduleFinding, ScanResult
+    from .inference import (
+        NoduleFinding,
+        ScanResult,
+        compute_image_number,
+        estimate_lobe,
+    )
 
     scan = _dm.manifest["scans"][series_uid]
+
+    # Load volume spatial data for lobe estimation and image number
+    vol_data = _load_volume_cached(series_uid)
+    z_min = z_max = 0.0
+    origin_z = 0.0
+    spacing_z = 1.0
+    if vol_data is not None:
+        hu_volume, spacing, origin, _ = vol_data
+        origin_z = origin[2]
+        spacing_z = spacing[2]
+        z_min = origin[2]
+        z_max = origin[2] + hu_volume.shape[0] * spacing[2]
+
     findings = []
     for ann in scan.get("annotations", []):
+        x = ann["coordX"]
+        y = ann["coordY"]
+        z = ann["coordZ"]
+        lobe = estimate_lobe(x, y, z, z_min, z_max) if vol_data else ""
+        image_num = compute_image_number(z, origin_z, spacing_z) if vol_data else 0
+
         findings.append(NoduleFinding(
-            x=ann["coordX"],
-            y=ann["coordY"],
-            z=ann["coordZ"],
+            x=x,
+            y=y,
+            z=z,
             diameter_mm=ann["diameter_mm"],
             confidence=1.0,
+            lobe=lobe,
+            image_number=image_num,
+            series_uid=series_uid,
         ))
 
     result = ScanResult(series_uid=series_uid, findings=findings)

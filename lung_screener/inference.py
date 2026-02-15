@@ -39,6 +39,12 @@ class NoduleFinding:
     lung_rads: str = ""
     # Optional malignancy score (1-5 scale)
     malignancy_score: float = 0.0
+    # Anatomical lobe (e.g. "right upper lobe")
+    lobe: str = ""
+    # Image/slice number in the series (1-based)
+    image_number: int = 0
+    # Series instance UID for this finding
+    series_uid: str = ""
 
     def __post_init__(self):
         if not self.lung_rads:
@@ -71,7 +77,66 @@ class NoduleFinding:
             "confidence": round(self.confidence, 3),
             "lung_rads": self.lung_rads,
             "malignancy_score": round(self.malignancy_score, 2),
+            "lobe": self.lobe,
+            "image_number": self.image_number,
+            "series_uid": self.series_uid,
         }
+
+
+def estimate_lobe(
+    x: float, y: float, z: float,
+    z_min: float, z_max: float,
+) -> str:
+    """Estimate which lung lobe a nodule is in from world coordinates.
+
+    Uses the DICOM patient coordinate system:
+        x: increases toward patient's left
+        y: increases toward patient's posterior
+        z: increases toward patient's superior (head)
+
+    Approximation based on standard anatomical proportions:
+        - Right lung (x < 0): upper / middle / lower lobes
+        - Left lung  (x > 0): upper / lower lobes
+        - The major fissure sits at roughly 40% of the z extent from the base
+        - The minor fissure (right only) sits at roughly 65% of z extent
+
+    Args:
+        x, y, z: World coordinates in mm.
+        z_min: Inferior extent of the lung volume (mm).
+        z_max: Superior extent of the lung volume (mm).
+
+    Returns:
+        Lobe name, e.g. "right upper lobe".
+    """
+    z_range = z_max - z_min
+    if z_range <= 0:
+        return "indeterminate"
+
+    # Normalized position: 0.0 = base (inferior), 1.0 = apex (superior)
+    z_norm = (z - z_min) / z_range
+
+    # Right lung: x < 0 in standard DICOM patient coords
+    if x < 0:
+        if z_norm >= 0.65:
+            return "right upper lobe"
+        elif z_norm >= 0.40:
+            return "right middle lobe"
+        else:
+            return "right lower lobe"
+    else:
+        if z_norm >= 0.50:
+            return "left upper lobe"
+        else:
+            return "left lower lobe"
+
+
+def compute_image_number(
+    z: float, origin_z: float, spacing_z: float,
+) -> int:
+    """Compute the 1-based image/slice number from a z world coordinate."""
+    if spacing_z == 0:
+        return 0
+    return int(round((z - origin_z) / spacing_z)) + 1
 
 
 @dataclass
@@ -123,10 +188,17 @@ class ScanResult:
     def dictation(self) -> str:
         """Generate radiology dictation text ready to paste into reporting software.
 
-        Produces prose in standard radiology report style with Lung-RADS
-        categorization and ACR-aligned follow-up recommendations.
+        Produces prose in standard radiology report style with lobe location,
+        series/image references, Lung-RADS categorization, and ACR-aligned
+        follow-up recommendations.
         """
         lines = []
+
+        # Series reference header
+        if self.series_uid:
+            lines.append(f"Series: {self.series_uid}")
+            lines.append("")
+
         lines.append("FINDINGS:")
         lines.append("")
 
@@ -154,8 +226,11 @@ class ScanResult:
         )
 
         for i, f in enumerate(sorted_findings, 1):
-            # Describe the nodule
-            nodule_desc = f"{i}. "
+            # Lobe location
+            lobe_text = f.lobe.capitalize() if f.lobe else "indeterminate location"
+
+            # Build the finding description
+            nodule_desc = f"{i}. {lobe_text}: "
             nodule_desc += f"A {f.diameter_mm:.0f} mm solid pulmonary nodule"
 
             # Malignancy risk language
@@ -165,6 +240,15 @@ class ScanResult:
                 nodule_desc += ", indeterminate"
 
             nodule_desc += f" (Lung-RADS {f.lung_rads})."
+
+            # Series and image reference
+            ref_parts = []
+            if f.series_uid:
+                ref_parts.append(f"Series {f.series_uid}")
+            if f.image_number > 0:
+                ref_parts.append(f"Image {f.image_number}")
+            if ref_parts:
+                nodule_desc += f" [{', '.join(ref_parts)}]"
 
             lines.append(nodule_desc)
 
@@ -298,6 +382,11 @@ class NoduleDetector:
 
             logger.info(f"Found {len(candidates)} candidates in scan")
 
+            # Compute z extent of the volume for lobe estimation
+            vol_shape = volume.shape  # (z, y, x) in numpy order
+            z_min = origin[2]  # SimpleITK origin z
+            z_max = origin[2] + vol_shape[0] * spacing[2]
+
             if not candidates:
                 return ScanResult(series_uid=series_uid)
 
@@ -343,13 +432,20 @@ class NoduleDetector:
                     if all_malignancy:
                         malignancy = float(all_malignancy[idx]) * 4.0 + 1.0  # Scale to [1, 5]
 
+                    wx = center_world[2]  # SimpleITK x
+                    wy = center_world[1]  # SimpleITK y
+                    wz = center_world[0]  # SimpleITK z
+
                     findings.append(NoduleFinding(
-                        x=center_world[2],  # SimpleITK x
-                        y=center_world[1],  # SimpleITK y
-                        z=center_world[0],  # SimpleITK z
+                        x=wx,
+                        y=wy,
+                        z=wz,
                         diameter_mm=cand["diameter_mm"],
                         confidence=float(prob),
                         malignancy_score=malignancy,
+                        lobe=estimate_lobe(wx, wy, wz, z_min, z_max),
+                        image_number=compute_image_number(wz, origin[2], spacing[2]),
+                        series_uid=series_uid,
                     ))
 
             # Step 5: Non-maximum suppression

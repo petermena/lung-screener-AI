@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from .inference import NoduleFinding, ScanResult
+from .inference import NoduleFinding, ScanResult, compute_image_number, estimate_lobe
 from .preprocessing import CTPreprocessor, extract_patch
 
 logger = logging.getLogger(__name__)
@@ -58,6 +58,11 @@ class NoduleDetectorONNX:
 
             logger.info(f"Found {len(candidates)} candidates in scan")
 
+            # Compute z extent for lobe estimation
+            vol_shape = volume.shape
+            z_min = origin[2]
+            z_max = origin[2] + vol_shape[0] * spacing[2]
+
             if not candidates:
                 return ScanResult(series_uid=series_uid)
 
@@ -93,12 +98,19 @@ class NoduleDetectorONNX:
                         o + c * s
                         for o, c, s in zip(origin, cand["center_voxel"], spacing)
                     )
+                    wx = center_world[2]
+                    wy = center_world[1]
+                    wz = center_world[0]
+
                     findings.append(NoduleFinding(
-                        x=center_world[2],
-                        y=center_world[1],
-                        z=center_world[0],
+                        x=wx,
+                        y=wy,
+                        z=wz,
                         diameter_mm=cand["diameter_mm"],
                         confidence=float(prob),
+                        lobe=estimate_lobe(wx, wy, wz, z_min, z_max),
+                        image_number=compute_image_number(wz, origin[2], spacing[2]),
+                        series_uid=series_uid,
                     ))
 
             findings = self._nms(findings)
