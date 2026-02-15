@@ -117,6 +117,21 @@ risk_model:
   enabled: false
   model: "brock"  # Brock/PanCan model
 
+# Incremental retraining from feedback
+retrain:
+  # Minimum feedback records before retraining is allowed
+  min_feedback_records: 20
+  # Fine-tuning epochs (lower than initial training)
+  epochs: 30
+  # Lower learning rate for fine-tuning (10x lower than initial)
+  learning_rate: 0.0001
+  batch_size: 32
+  weight_decay: 0.0001
+  # Early stopping patience
+  early_stopping_patience: 10
+  # Max AUC/sensitivity drop allowed before rejecting new model
+  regression_tolerance: 0.01
+
 # Active learning
 active_learning:
   strategy: "entropy"  # "entropy", "margin", or "mc_dropout"

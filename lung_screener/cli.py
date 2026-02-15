@@ -382,6 +382,75 @@ def feedback_cmd(ctx, feedback_dir, export_dir):
                     f"{result['rejected_count']} negative annotations to {export_dir}")
 
 
+@main.command(name="retrain")
+@click.option("--checkpoint", "-m", type=click.Path(exists=True), required=True, help="Current best model checkpoint")
+@click.option("--feedback-dir", default="./data/feedback", help="Feedback storage directory")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory")
+@click.option("--epochs", type=int, help="Override fine-tuning epochs")
+@click.option("--lr", type=float, help="Override learning rate")
+@click.option("--min-feedback", type=int, help="Minimum feedback records required")
+@click.option("--history", is_flag=True, help="Show retrain history instead of running")
+@click.pass_context
+def retrain(ctx, checkpoint, feedback_dir, checkpoint_dir, epochs, lr, min_feedback, history):
+    """Incrementally retrain the model using radiologist feedback.
+
+    Loads the current best model, merges accumulated feedback with the
+    original training data, fine-tunes with a low learning rate, and
+    promotes the new model only if it doesn't regress on validation.
+
+    All operations run fully offline.
+
+    \b
+    Example:
+        lung-screener retrain -m checkpoints/best.pth
+        lung-screener retrain -m checkpoints/best.pth --min-feedback 10
+        lung-screener retrain -m checkpoints/best.pth --history
+    """
+    from .retrain import IncrementalRetrainer
+
+    config = ctx.obj["config"]
+
+    if epochs:
+        config.setdefault("retrain", {})["epochs"] = epochs
+    if lr:
+        config.setdefault("retrain", {})["learning_rate"] = lr
+    if min_feedback:
+        config.setdefault("retrain", {})["min_feedback_records"] = min_feedback
+
+    retrainer = IncrementalRetrainer(
+        config,
+        base_checkpoint=checkpoint,
+        feedback_dir=feedback_dir,
+        checkpoint_dir=checkpoint_dir,
+    )
+
+    if history:
+        entries = retrainer.get_retrain_history()
+        if not entries:
+            click.echo("No retrain history found.")
+            return
+        click.echo(f"{'Retrain ID':<20} {'Records':>8} {'Baseline AUC':>13} {'New AUC':>9} {'Promoted':>9}")
+        click.echo("-" * 65)
+        for entry in entries:
+            click.echo(
+                f"{entry['retrain_id']:<20} "
+                f"{entry['feedback_records_used']:>8} "
+                f"{entry['baseline_auc']:>13.4f} "
+                f"{entry['new_auc']:>9.4f} "
+                f"{'YES' if entry['promoted'] else 'no':>9}"
+            )
+        return
+
+    click.echo("Starting incremental retrain...")
+    click.echo(f"  Base model: {checkpoint}")
+    click.echo(f"  Feedback dir: {feedback_dir}")
+    click.echo("")
+
+    result = retrainer.retrain()
+    click.echo("")
+    click.echo(result.summary())
+
+
 @main.command(name="annotate")
 @click.option("--data-dir", default="./data/training", help="Training data directory")
 @click.option("--port", "-p", type=int, default=8888, help="Web UI port")
