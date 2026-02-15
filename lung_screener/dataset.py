@@ -1,7 +1,7 @@
 """Dataset classes for LUNA16/LIDC-IDRI lung nodule data.
 
 Handles loading annotations, creating train/val splits, and providing
-3D patches with data augmentation for training.
+3D patches with enhanced data augmentation for training.
 """
 
 from pathlib import Path
@@ -50,6 +50,13 @@ class LUNA16Dataset(Dataset):
         self.aug_flip = aug_config.get("flip", True)
         self.aug_scale_range = aug_config.get("scale_range", [0.9, 1.1])
         self.aug_noise_std = aug_config.get("noise_std", 0.01)
+        # Enhanced augmentation options
+        self.aug_elastic = aug_config.get("elastic_deformation", False)
+        self.aug_elastic_alpha = aug_config.get("elastic_alpha", 15.0)
+        self.aug_elastic_sigma = aug_config.get("elastic_sigma", 3.0)
+        self.aug_intensity_shift = aug_config.get("intensity_shift", 0.0)
+        self.aug_intensity_scale = aug_config.get("intensity_scale", 0.0)
+        self.aug_mixup_alpha = aug_config.get("mixup_alpha", 0.0)
 
         # Load annotations and candidates
         self.samples = self._load_samples(val_split)
@@ -191,7 +198,11 @@ class LUNA16Dataset(Dataset):
         return voxel
 
     def _augment_patch(self, patch: np.ndarray) -> np.ndarray:
-        """Apply random data augmentation to a 3D patch."""
+        """Apply random data augmentation to a 3D patch.
+
+        Supports standard augmentations (rotation, flip, scale, noise)
+        plus enhanced options (elastic deformation, intensity shifts).
+        """
         # Random rotation (90-degree increments around each axis)
         if self.aug_rotation:
             k = np.random.randint(0, 4)
@@ -213,12 +224,79 @@ class LUNA16Dataset(Dataset):
                 # Crop or pad back to original size
                 patch = self._crop_or_pad(patch, self.patch_size)
 
+        # Elastic deformation
+        if self.aug_elastic:
+            patch = self._elastic_deformation(
+                patch, self.aug_elastic_alpha, self.aug_elastic_sigma
+            )
+
+        # Random intensity shift
+        if self.aug_intensity_shift > 0:
+            shift = np.random.uniform(
+                -self.aug_intensity_shift, self.aug_intensity_shift
+            )
+            patch = np.clip(patch + shift, 0.0, 1.0)
+
+        # Random intensity scale
+        if self.aug_intensity_scale > 0:
+            scale = np.random.uniform(
+                1.0 - self.aug_intensity_scale, 1.0 + self.aug_intensity_scale
+            )
+            patch = np.clip(patch * scale, 0.0, 1.0)
+
         # Random Gaussian noise
         if self.aug_noise_std > 0:
             noise = np.random.normal(0, self.aug_noise_std, patch.shape).astype(np.float32)
             patch = patch + noise
 
         return patch
+
+    def _elastic_deformation(
+        self, patch: np.ndarray, alpha: float, sigma: float
+    ) -> np.ndarray:
+        """Apply random elastic deformation to a 3D patch.
+
+        Creates smooth random displacement fields and applies them to
+        the patch for realistic tissue-like deformations.
+
+        Args:
+            patch: 3D numpy array.
+            alpha: Deformation magnitude.
+            sigma: Gaussian smoothing sigma for displacement fields.
+
+        Returns:
+            Deformed patch.
+        """
+        shape = patch.shape
+        # Generate random displacement fields
+        dz = ndimage.gaussian_filter(
+            np.random.randn(*shape) * alpha, sigma, mode="reflect"
+        )
+        dy = ndimage.gaussian_filter(
+            np.random.randn(*shape) * alpha, sigma, mode="reflect"
+        )
+        dx = ndimage.gaussian_filter(
+            np.random.randn(*shape) * alpha, sigma, mode="reflect"
+        )
+
+        # Create coordinate grids
+        z, y, x = np.meshgrid(
+            np.arange(shape[0]),
+            np.arange(shape[1]),
+            np.arange(shape[2]),
+            indexing="ij",
+        )
+
+        # Apply displacements
+        coords = [
+            np.clip(z + dz, 0, shape[0] - 1),
+            np.clip(y + dy, 0, shape[1] - 1),
+            np.clip(x + dx, 0, shape[2] - 1),
+        ]
+
+        return ndimage.map_coordinates(
+            patch, coords, order=1, mode="reflect"
+        ).astype(patch.dtype)
 
     def _crop_or_pad(self, volume: np.ndarray, target_size: tuple) -> np.ndarray:
         """Crop or zero-pad a volume to the target size."""

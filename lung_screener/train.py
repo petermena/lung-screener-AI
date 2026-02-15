@@ -5,7 +5,7 @@ Handles the full training loop with:
 - Learning rate scheduling with warmup
 - Early stopping
 - Checkpoint saving
-- Metrics logging
+- Metrics logging and dashboard generation
 """
 
 import logging
@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .dataset import LUNA16Dataset
+from .metrics_dashboard import MetricsLogger, save_dashboard
 from .model import build_model
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,9 @@ class Trainer:
             schedulers=[warmup_scheduler, cosine_scheduler],
             milestones=[warmup_epochs],
         )
+
+        # Metrics logger for dashboard
+        self.metrics_logger = MetricsLogger(self.checkpoint_dir)
 
         # Tracking
         self.best_val_auc = 0.0
@@ -321,6 +325,10 @@ class Trainer:
             # Step scheduler
             self.scheduler.step()
 
+            # Log metrics to dashboard
+            current_lr = self.optimizer.param_groups[0]["lr"]
+            self.metrics_logger.log_epoch(epoch, train_metrics, val_metrics, current_lr)
+
             # Check for improvement
             is_best = val_metrics["auc"] > self.best_val_auc
             if is_best:
@@ -339,4 +347,10 @@ class Trainer:
                 )
                 break
 
+        # Generate final dashboard
+        dashboard_path = save_dashboard(
+            self.metrics_logger.metrics_file,
+            self.checkpoint_dir / "dashboard.html",
+        )
+        logger.info(f"Training dashboard: {dashboard_path}")
         logger.info(f"Training complete. Best validation AUC: {self.best_val_auc:.4f}")

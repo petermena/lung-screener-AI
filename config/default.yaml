@@ -9,6 +9,8 @@ model:
   num_classes: 2
   # Candidate patch size in voxels (z, y, x)
   patch_size: [48, 48, 48]
+  # Enable nodule type classification (solid, part-solid, ground-glass)
+  predict_nodule_type: false
 
 preprocessing:
   # Resample all scans to this spacing in mm (z, y, x)
@@ -41,6 +43,13 @@ training:
     flip: true
     scale_range: [0.9, 1.1]
     noise_std: 0.01
+    # Enhanced augmentation (set to true/nonzero to enable)
+    elastic_deformation: false
+    elastic_alpha: 15.0
+    elastic_sigma: 3.0
+    intensity_shift: 0.0
+    intensity_scale: 0.0
+    mixup_alpha: 0.0
   # Early stopping patience (epochs)
   early_stopping_patience: 15
   # Learning rate scheduler
@@ -55,6 +64,8 @@ inference:
   nms_distance_mm: 10.0
   # Batch size for inference
   batch_size: 64
+  # Input validation (verify chest CT before processing)
+  validate_input: true
 
 pacs:
   # DICOM Application Entity settings
@@ -78,3 +89,36 @@ data:
   val_split: 0.2
   # Directory for manually imported DICOM scans & annotations
   training_dir: "./data/training"
+
+# False positive reduction (second-stage classifier)
+fp_reduction:
+  enabled: false
+  model_path: ""
+  threshold: 0.5
+
+# Confidence calibration
+calibration:
+  enabled: false
+  method: "temperature"  # "temperature" or "platt"
+  calibration_file: ""
+
+# Prior study comparison and growth tracking
+tracking:
+  enabled: false
+  tracking_dir: "./data/tracking"
+
+# Radiologist feedback loop
+feedback:
+  enabled: false
+  feedback_dir: "./data/feedback"
+
+# Patient demographics / risk scoring
+risk_model:
+  enabled: false
+  model: "brock"  # Brock/PanCan model
+
+# Active learning
+active_learning:
+  strategy: "entropy"  # "entropy", "margin", or "mc_dropout"
+  n_select: 50
+  mc_forward_passes: 10

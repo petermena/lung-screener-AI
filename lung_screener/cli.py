@@ -1,6 +1,8 @@
 """Command-line interface for Lung Screener AI.
 
-Provides commands for training, inference, and PACS server management.
+Provides commands for training, inference, PACS server management,
+batch processing, feedback, risk scoring, active learning, calibration,
+and metrics visualization.
 """
 
 import json
@@ -89,8 +91,9 @@ def train(ctx, epochs, batch_size, lr, resume, checkpoint_dir):
 @click.option("--model", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
 @click.option("--output", "-o", type=click.Path(), help="Output JSON file")
 @click.option("--format", "output_format", type=click.Choice(["json", "text", "report"]), default="text")
+@click.option("--validate/--no-validate", default=True, help="Validate DICOM input")
 @click.pass_context
-def predict(ctx, input_path, model, output, output_format):
+def predict(ctx, input_path, model, output, output_format, validate):
     """Run nodule detection on a CT scan.
 
     INPUT_PATH can be a directory of DICOM files or a .mhd file.
@@ -99,6 +102,19 @@ def predict(ctx, input_path, model, output, output_format):
 
     config = ctx.obj["config"]
     model_path = Path(model)
+    input_path = Path(input_path)
+
+    # Input validation for DICOM directories
+    if validate and input_path.is_dir():
+        from .input_validation import validate_dicom_series
+
+        validation = validate_dicom_series(input_path)
+        if not validation.is_valid:
+            click.echo(validation.summary(), err=True)
+            sys.exit(1)
+        if validation.warnings:
+            for w in validation.warnings:
+                click.echo(f"Warning: {w}", err=True)
 
     # Use ONNX runtime if model is .onnx, otherwise use PyTorch
     if model_path.suffix == ".onnx":
@@ -107,8 +123,6 @@ def predict(ctx, input_path, model, output, output_format):
     else:
         from .inference import NoduleDetector
         detector = NoduleDetector(config, model_path=model_path)
-
-    input_path = Path(input_path)
 
     # Load scan
     if input_path.suffix == ".mhd":
@@ -200,6 +214,174 @@ def export_model(ctx, checkpoint, output):
     click.echo("Use with: lung-screener predict /path/to/scan -m model.onnx")
 
 
+@main.command(name="batch")
+@click.argument("input_dir", type=click.Path(exists=True))
+@click.option("--model", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
+@click.option("--output", "-o", type=click.Path(), help="Output JSON results file")
+@click.option("--priority", type=click.Choice(["stat", "urgent", "routine", "low"]), default="routine")
+@click.option("--no-validate", is_flag=True, help="Skip input validation")
+@click.pass_context
+def batch(ctx, input_dir, model, output, priority, no_validate):
+    """Process multiple CT studies in batch mode.
+
+    INPUT_DIR should contain subdirectories with DICOM files, or .mhd files.
+    Studies are processed in priority order with progress tracking.
+    """
+    from .worklist import BatchProcessor, Priority
+
+    config = ctx.obj["config"]
+    model_path = Path(model)
+
+    if model_path.suffix == ".onnx":
+        from .inference_onnx import NoduleDetectorONNX
+        detector = NoduleDetectorONNX(config, onnx_path=model_path)
+    else:
+        from .inference import NoduleDetector
+        detector = NoduleDetector(config, model_path=model_path)
+
+    priority_map = {
+        "stat": Priority.STAT,
+        "urgent": Priority.URGENT,
+        "routine": Priority.ROUTINE,
+        "low": Priority.LOW,
+    }
+
+    def on_progress(current, total, entry):
+        click.echo(f"  [{current}/{total}] {entry.study_id} - {entry.status.value}")
+
+    processor = BatchProcessor(
+        detector,
+        validate_input=not no_validate,
+        on_progress=on_progress,
+    )
+
+    count = processor.add_directory(input_dir, priority=priority_map[priority])
+    click.echo(f"Found {count} studies to process")
+    click.echo("")
+
+    processor.process_all()
+
+    click.echo("")
+    click.echo(processor.format_worklist_report())
+
+    if output:
+        processor.save_results(output)
+        click.echo(f"Results saved to {output}")
+
+
+@main.command(name="validate")
+@click.argument("input_path", type=click.Path(exists=True))
+def validate_input(input_path):
+    """Validate that a DICOM directory contains a suitable chest CT."""
+    from .input_validation import validate_dicom_series
+
+    result = validate_dicom_series(input_path)
+    click.echo(result.summary())
+    if not result.is_valid:
+        sys.exit(1)
+
+
+@main.command(name="dashboard")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory with metrics.json")
+@click.option("--output", "-o", type=click.Path(), help="Output HTML file")
+@click.pass_context
+def dashboard(ctx, checkpoint_dir, output):
+    """Generate training metrics dashboard.
+
+    Creates an interactive HTML page with training curves, validation
+    metrics, and performance analysis.
+    """
+    from .metrics_dashboard import save_dashboard
+
+    metrics_path = Path(checkpoint_dir) / "metrics.json"
+    if not metrics_path.exists():
+        click.echo(f"No metrics.json found in {checkpoint_dir}", err=True)
+        click.echo("Run training first to generate metrics.", err=True)
+        sys.exit(1)
+
+    output_path = save_dashboard(metrics_path, output)
+    click.echo(f"Dashboard saved to {output_path}")
+
+
+@main.command(name="risk")
+@click.option("--age", type=int, required=True, help="Patient age")
+@click.option("--sex", type=click.Choice(["M", "F"]), required=True, help="Patient sex")
+@click.option("--diameter", "-d", type=float, required=True, help="Nodule diameter in mm")
+@click.option("--nodule-type", type=click.Choice(["solid", "part_solid", "ground_glass"]), default="solid")
+@click.option("--pack-years", type=float, default=0.0, help="Smoking pack-years")
+@click.option("--family-history", is_flag=True, help="Family history of lung cancer")
+@click.option("--emphysema", is_flag=True, help="Emphysema present")
+@click.option("--upper-lobe", is_flag=True, help="Nodule in upper lobe")
+@click.pass_context
+def risk(ctx, age, sex, diameter, nodule_type, pack_years, family_history, emphysema, upper_lobe):
+    """Compute Brock/PanCan malignancy risk score for a nodule.
+
+    Uses patient demographics and nodule characteristics to estimate
+    malignancy probability based on the validated PanCan model.
+    """
+    from .risk_model import (
+        PatientDemographics,
+        compute_brock_score,
+        compute_lung_rads_with_risk,
+        screening_eligibility,
+    )
+
+    demographics = PatientDemographics(
+        age=age,
+        sex=sex,
+        pack_years=pack_years,
+        family_history_lung_cancer=family_history,
+        emphysema=emphysema,
+    )
+
+    score = compute_brock_score(
+        demographics,
+        nodule_diameter_mm=diameter,
+        nodule_type=nodule_type,
+        upper_lobe=upper_lobe,
+    )
+
+    lung_rads = compute_lung_rads_with_risk(diameter, nodule_type, score)
+    eligibility = screening_eligibility(demographics)
+
+    click.echo(f"Brock/PanCan Risk Score")
+    click.echo(f"  Malignancy probability: {score.malignancy_probability:.1%}")
+    click.echo(f"  Risk category: {score.risk_category}")
+    click.echo(f"  Lung-RADS (risk-adjusted): {lung_rads}")
+    click.echo(f"")
+    click.echo(f"Screening Eligibility ({eligibility['criteria']}):")
+    click.echo(f"  {'Eligible' if eligibility['eligible'] else 'Not eligible'}")
+    for reason in eligibility["reasons"]:
+        click.echo(f"  - {reason}")
+
+
+@main.command(name="feedback")
+@click.option("--feedback-dir", default="./data/feedback", help="Feedback storage directory")
+@click.option("--export", "export_dir", type=click.Path(), help="Export confirmed findings for retraining")
+@click.pass_context
+def feedback_cmd(ctx, feedback_dir, export_dir):
+    """View feedback statistics or export confirmed findings for retraining."""
+    from .feedback import FeedbackStore
+
+    store = FeedbackStore(feedback_dir)
+    stats = store.get_stats()
+
+    click.echo("Radiologist Feedback Statistics")
+    click.echo(f"  Total feedback records: {stats['total_feedback']}")
+    click.echo(f"  Confirmed (true positive): {stats['confirmed']}")
+    click.echo(f"  Rejected (false positive): {stats['rejected']}")
+    click.echo(f"  AI precision: {stats['precision']:.1%}")
+    click.echo(f"  Avg size disagreement: {stats['avg_size_disagreement_mm']:.1f} mm")
+    click.echo(f"  Lung-RADS agreement: {stats['lung_rads_agreement']:.1%}")
+    click.echo(f"  Avg TP confidence: {stats['avg_tp_confidence']:.3f}")
+    click.echo(f"  Avg FP confidence: {stats['avg_fp_confidence']:.3f}")
+
+    if export_dir:
+        result = store.export_for_training(export_dir)
+        click.echo(f"\nExported {result['confirmed_count']} positive and "
+                    f"{result['rejected_count']} negative annotations to {export_dir}")
+
+
 @main.command(name="annotate")
 @click.option("--data-dir", default="./data/training", help="Training data directory")
 @click.option("--port", "-p", type=int, default=8888, help="Web UI port")
@@ -276,7 +458,7 @@ def data_import(ctx, dicom_dir, label):
 def data_annotate(ctx, series_uid, x, y, z, diameter, note):
     """Add a nodule annotation to an imported scan.
 
-    Coordinates should be in world mm — the same values shown by your
+    Coordinates should be in world mm -- the same values shown by your
     DICOM viewer when you hover over the nodule.
 
     Example:

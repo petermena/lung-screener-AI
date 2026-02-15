@@ -4,8 +4,9 @@ Handles end-to-end prediction on new CT scans:
 1. Preprocess the scan
 2. Detect candidates
 3. Classify each candidate
-4. Apply non-maximum suppression
-5. Generate structured findings
+4. Determine nodule type (solid, part-solid, ground-glass)
+5. Apply non-maximum suppression
+6. Generate structured findings with type-aware Lung-RADS
 """
 
 import logging
@@ -17,8 +18,9 @@ import SimpleITK as sitk
 import torch
 from torch.cuda.amp import autocast
 
-from .model import build_model
+from .model import NODULE_TYPES, build_model
 from .preprocessing import CTPreprocessor, extract_patch
+from .risk_model import compute_lung_rads_with_risk
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +37,7 @@ class NoduleFinding:
     diameter_mm: float
     # Model confidence (0-1)
     confidence: float
-    # Lung-RADS category (computed from diameter)
+    # Lung-RADS category (computed from diameter and type)
     lung_rads: str = ""
     # Optional malignancy score (1-5 scale)
     malignancy_score: float = 0.0
@@ -45,30 +47,22 @@ class NoduleFinding:
     image_number: int = 0
     # Series instance UID for this finding
     series_uid: str = ""
+    # Nodule type: "solid", "part_solid", or "ground_glass"
+    nodule_type: str = "solid"
 
     def __post_init__(self):
         if not self.lung_rads:
             self.lung_rads = self._compute_lung_rads()
 
     def _compute_lung_rads(self) -> str:
-        """Assign Lung-RADS category based on nodule diameter.
+        """Assign Lung-RADS category based on nodule diameter and type.
 
-        Based on ACR Lung-RADS v2022 for solid nodules:
-            1: No nodules or clearly benign
-            2: <6mm solid nodule
-            3: 6-8mm solid nodule
-            4A: 8-15mm solid nodule
-            4B: >=15mm solid nodule
+        Based on ACR Lung-RADS v2022 thresholds which vary by nodule type:
+            Solid: 2 (<6mm), 3 (6-8mm), 4A (8-15mm), 4B (>=15mm)
+            Part-solid: 2 (<6mm), 3 (6-8mm), 4A (8-15mm), 4B (>=15mm)
+            Ground-glass: 2 (<30mm), 3 (>=30mm)
         """
-        d = self.diameter_mm
-        if d < 6:
-            return "2"
-        elif d < 8:
-            return "3"
-        elif d < 15:
-            return "4A"
-        else:
-            return "4B"
+        return compute_lung_rads_with_risk(self.diameter_mm, self.nodule_type)
 
     def to_dict(self) -> dict:
         return {
@@ -80,6 +74,7 @@ class NoduleFinding:
             "lobe": self.lobe,
             "image_number": self.image_number,
             "series_uid": self.series_uid,
+            "nodule_type": self.nodule_type,
         }
 
 
@@ -174,7 +169,7 @@ class ScanResult:
 
         for i, f in enumerate(self.findings, 1):
             lines.append(
-                f"  Finding {i}: {f.diameter_mm:.1f}mm nodule at "
+                f"  Finding {i}: {f.diameter_mm:.1f}mm {f.nodule_type} nodule at "
                 f"({f.x:.1f}, {f.y:.1f}, {f.z:.1f})mm, "
                 f"confidence={f.confidence:.1%}, "
                 f"Lung-RADS {f.lung_rads}"
@@ -189,8 +184,8 @@ class ScanResult:
         """Generate radiology dictation text ready to paste into reporting software.
 
         Produces prose in standard radiology report style with lobe location,
-        series/image references, Lung-RADS categorization, and ACR-aligned
-        follow-up recommendations.
+        series/image references, nodule type, Lung-RADS categorization, and
+        ACR-aligned follow-up recommendations.
         """
         lines = []
 
@@ -229,9 +224,12 @@ class ScanResult:
             # Lobe location
             lobe_text = f.lobe.capitalize() if f.lobe else "indeterminate location"
 
+            # Nodule type descriptor
+            type_desc = _nodule_type_label(f.nodule_type)
+
             # Build the finding description
             nodule_desc = f"{i}. {lobe_text}: "
-            nodule_desc += f"A {f.diameter_mm:.0f} mm solid pulmonary nodule"
+            nodule_desc += f"A {f.diameter_mm:.0f} mm {type_desc} pulmonary nodule"
 
             # Malignancy risk language
             if f.malignancy_score >= 4.0:
@@ -267,6 +265,16 @@ class ScanResult:
         )
 
         return "\n".join(lines)
+
+
+def _nodule_type_label(nodule_type: str) -> str:
+    """Convert nodule type code to radiology report language."""
+    labels = {
+        "solid": "solid",
+        "part_solid": "part-solid",
+        "ground_glass": "ground-glass",
+    }
+    return labels.get(nodule_type, "solid")
 
 
 # Lung-RADS recommendation language per ACR guidelines
@@ -308,12 +316,16 @@ def _lung_rads_impression(category: str, findings: list) -> str:
     nodule_summary = ""
     if len(findings) == 1:
         f = findings[0]
-        nodule_summary = f"A {f.diameter_mm:.0f} mm pulmonary nodule. "
+        type_desc = _nodule_type_label(f.nodule_type)
+        nodule_summary = f"A {f.diameter_mm:.0f} mm {type_desc} pulmonary nodule. "
     elif len(findings) > 1:
-        sizes = ", ".join(f"{f.diameter_mm:.0f} mm" for f in findings)
+        descs = []
+        for f in findings:
+            type_desc = _nodule_type_label(f.nodule_type)
+            descs.append(f"{f.diameter_mm:.0f} mm {type_desc}")
         nodule_summary = (
             f"{len(findings)} pulmonary nodules "
-            f"measuring {sizes}. "
+            f"measuring {', '.join(descs)}. "
         )
 
     return (
@@ -345,6 +357,11 @@ class NoduleDetector:
         self.threshold = inf_config.get("threshold", 0.5)
         self.nms_distance_mm = inf_config.get("nms_distance_mm", 10.0)
         self.batch_size = inf_config.get("batch_size", 64)
+
+        # Nodule type prediction
+        self.predict_nodule_type = config.get("model", {}).get(
+            "predict_nodule_type", False
+        )
 
         # Build and load model
         self.model = build_model(config).to(self.device)
@@ -404,6 +421,7 @@ class NoduleDetector:
             # Step 3: Classify in batches
             all_probs = []
             all_malignancy = []
+            all_nodule_types = []
             for i in range(0, len(patches_array), self.batch_size):
                 batch = torch.from_numpy(
                     patches_array[i : i + self.batch_size]
@@ -417,6 +435,10 @@ class NoduleDetector:
 
                 if "malignancy" in output:
                     all_malignancy.extend(output["malignancy"].cpu().numpy().flatten())
+
+                if "nodule_type_logits" in output:
+                    type_preds = torch.argmax(output["nodule_type_logits"], dim=1)
+                    all_nodule_types.extend(type_preds.cpu().numpy())
 
             # Step 4: Filter by threshold
             findings = []
@@ -432,6 +454,13 @@ class NoduleDetector:
                     if all_malignancy:
                         malignancy = float(all_malignancy[idx]) * 4.0 + 1.0  # Scale to [1, 5]
 
+                    # Determine nodule type
+                    nodule_type = "solid"
+                    if all_nodule_types:
+                        type_idx = int(all_nodule_types[idx])
+                        if 0 <= type_idx < len(NODULE_TYPES):
+                            nodule_type = NODULE_TYPES[type_idx]
+
                     wx = center_world[2]  # SimpleITK x
                     wy = center_world[1]  # SimpleITK y
                     wz = center_world[0]  # SimpleITK z
@@ -446,6 +475,7 @@ class NoduleDetector:
                         lobe=estimate_lobe(wx, wy, wz, z_min, z_max),
                         image_number=compute_image_number(wz, origin[2], spacing[2]),
                         series_uid=series_uid,
+                        nodule_type=nodule_type,
                     ))
 
             # Step 5: Non-maximum suppression

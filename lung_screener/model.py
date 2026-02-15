@@ -1,12 +1,16 @@
 """3D CNN architectures for lung nodule classification.
 
 Provides ResNet3D and DenseNet3D models that classify 3D patches
-as nodule vs. non-nodule, with optional malignancy scoring.
+as nodule vs. non-nodule, with optional malignancy scoring and
+nodule type classification (solid, part-solid, ground-glass).
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Nodule type labels
+NODULE_TYPES = ["solid", "part_solid", "ground_glass"]
 
 
 class ResidualBlock3D(nn.Module):
@@ -44,6 +48,7 @@ class NoduleResNet3D(nn.Module):
     Takes a 3D patch (e.g., 48x48x48) and outputs:
     - nodule probability (binary classification)
     - optional malignancy score (regression)
+    - optional nodule type (solid, part-solid, ground-glass)
 
     Architecture:
         conv -> 4 residual stages -> global avg pool -> FC layers
@@ -55,9 +60,11 @@ class NoduleResNet3D(nn.Module):
         num_classes: int = 2,
         base_filters: int = 32,
         predict_malignancy: bool = False,
+        predict_nodule_type: bool = False,
     ):
         super().__init__()
         self.predict_malignancy = predict_malignancy
+        self.predict_nodule_type = predict_nodule_type
 
         # Initial convolution
         self.conv1 = nn.Conv3d(
@@ -93,6 +100,16 @@ class NoduleResNet3D(nn.Module):
                 nn.Sigmoid(),  # Output in [0, 1], scale to [1, 5] externally
             )
 
+        # Optional nodule type classification head
+        # 3 classes: solid (0), part_solid (1), ground_glass (2)
+        if predict_nodule_type:
+            self.nodule_type_head = nn.Sequential(
+                nn.Dropout(0.5),
+                nn.Linear(base_filters * 8, 64),
+                nn.ReLU(),
+                nn.Linear(64, len(NODULE_TYPES)),
+            )
+
         self._initialize_weights()
 
     def _make_stage(
@@ -126,6 +143,7 @@ class NoduleResNet3D(nn.Module):
                 - logits: (B, num_classes) classification logits
                 - features: (B, 256) feature vector from GAP
                 - malignancy: (B, 1) malignancy score (if enabled)
+                - nodule_type_logits: (B, 3) nodule type logits (if enabled)
         """
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.stage1(x)
@@ -142,6 +160,9 @@ class NoduleResNet3D(nn.Module):
 
         if self.predict_malignancy:
             result["malignancy"] = self.malignancy_head(features)
+
+        if self.predict_nodule_type:
+            result["nodule_type_logits"] = self.nodule_type_head(features)
 
         return result
 
@@ -203,9 +224,11 @@ class NoduleDenseNet3D(nn.Module):
         growth_rate: int = 16,
         block_layers: tuple[int, ...] = (4, 8, 16, 12),
         predict_malignancy: bool = False,
+        predict_nodule_type: bool = False,
     ):
         super().__init__()
         self.predict_malignancy = predict_malignancy
+        self.predict_nodule_type = predict_nodule_type
 
         # Initial convolution
         num_features = growth_rate * 2
@@ -244,6 +267,14 @@ class NoduleDenseNet3D(nn.Module):
                 nn.Sigmoid(),
             )
 
+        if predict_nodule_type:
+            self.nodule_type_head = nn.Sequential(
+                nn.Dropout(0.5),
+                nn.Linear(num_features, 64),
+                nn.ReLU(),
+                nn.Linear(64, len(NODULE_TYPES)),
+            )
+
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         x = self.features(x)
         for block in self.blocks:
@@ -258,6 +289,9 @@ class NoduleDenseNet3D(nn.Module):
 
         if self.predict_malignancy:
             result["malignancy"] = self.malignancy_head(features)
+
+        if self.predict_nodule_type:
+            result["nodule_type_logits"] = self.nodule_type_head(features)
 
         return result
 
@@ -275,16 +309,19 @@ def build_model(config: dict) -> nn.Module:
     arch = model_config.get("architecture", "resnet3d")
     in_channels = model_config.get("in_channels", 1)
     num_classes = model_config.get("num_classes", 2)
+    predict_nodule_type = model_config.get("predict_nodule_type", False)
 
     if arch == "resnet3d":
         return NoduleResNet3D(
             in_channels=in_channels,
             num_classes=num_classes,
+            predict_nodule_type=predict_nodule_type,
         )
     elif arch == "densenet3d":
         return NoduleDenseNet3D(
             in_channels=in_channels,
             num_classes=num_classes,
+            predict_nodule_type=predict_nodule_type,
         )
     else:
         raise ValueError(f"Unknown architecture: {arch}. Use 'resnet3d' or 'densenet3d'.")
