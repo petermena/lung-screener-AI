@@ -120,6 +120,124 @@ class ScanResult:
 
         return "\n".join(lines)
 
+    def dictation(self) -> str:
+        """Generate radiology dictation text ready to paste into reporting software.
+
+        Produces prose in standard radiology report style with Lung-RADS
+        categorization and ACR-aligned follow-up recommendations.
+        """
+        lines = []
+        lines.append("FINDINGS:")
+        lines.append("")
+
+        lung_rads = self.lung_rads_overall or "1"
+
+        if not self.findings:
+            lines.append(
+                "No pulmonary nodules identified. "
+                "The lungs are clear."
+            )
+            lines.append("")
+            lines.append("IMPRESSION:")
+            lines.append(
+                "Lung-RADS Category 1: Negative. "
+                "No pulmonary nodules. "
+                "Continue annual screening with low-dose CT in 12 months."
+            )
+            return "\n".join(lines)
+
+        lines.append("Pulmonary Nodules:")
+
+        # Sort findings by size (largest first) for clinical relevance
+        sorted_findings = sorted(
+            self.findings, key=lambda f: f.diameter_mm, reverse=True
+        )
+
+        for i, f in enumerate(sorted_findings, 1):
+            # Describe the nodule
+            nodule_desc = f"{i}. "
+            nodule_desc += f"A {f.diameter_mm:.0f} mm solid pulmonary nodule"
+
+            # Malignancy risk language
+            if f.malignancy_score >= 4.0:
+                nodule_desc += ", suspicious for malignancy"
+            elif f.malignancy_score >= 3.0:
+                nodule_desc += ", indeterminate"
+
+            nodule_desc += f" (Lung-RADS {f.lung_rads})."
+
+            lines.append(nodule_desc)
+
+        lines.append("")
+        lines.append("IMPRESSION:")
+
+        # Overall Lung-RADS with ACR-based recommendation
+        rads_text = _lung_rads_impression(lung_rads, sorted_findings)
+        lines.append(rads_text)
+
+        lines.append("")
+        lines.append(
+            "Note: Computer-aided detection was used. "
+            "Findings should be correlated with clinical history "
+            "and prior imaging when available."
+        )
+
+        return "\n".join(lines)
+
+
+# Lung-RADS recommendation language per ACR guidelines
+_LUNG_RADS_RECOMMENDATIONS = {
+    "1": (
+        "Negative",
+        "No pulmonary nodules. Continue annual screening with low-dose CT in 12 months.",
+    ),
+    "2": (
+        "Benign Appearance or Behavior",
+        "Nodule(s) with very low likelihood of becoming a clinically active cancer. "
+        "Continue annual screening with low-dose CT in 12 months.",
+    ),
+    "3": (
+        "Probably Benign",
+        "Probably benign finding(s). "
+        "Short-term follow-up suggested. "
+        "Recommend low-dose CT in 6 months.",
+    ),
+    "4A": (
+        "Suspicious",
+        "Findings suspicious for pulmonary malignancy. "
+        "Recommend low-dose CT in 3 months, PET/CT may be considered.",
+    ),
+    "4B": (
+        "Very Suspicious",
+        "Findings very suspicious for pulmonary malignancy. "
+        "Recommend tissue sampling and/or PET/CT. Consider multidisciplinary consultation.",
+    ),
+}
+
+
+def _lung_rads_impression(category: str, findings: list) -> str:
+    """Build the impression line for a given Lung-RADS category."""
+    label, recommendation = _LUNG_RADS_RECOMMENDATIONS.get(
+        category, ("Indeterminate", "Clinical correlation recommended.")
+    )
+
+    nodule_summary = ""
+    if len(findings) == 1:
+        f = findings[0]
+        nodule_summary = f"A {f.diameter_mm:.0f} mm pulmonary nodule. "
+    elif len(findings) > 1:
+        sizes = ", ".join(f"{f.diameter_mm:.0f} mm" for f in findings)
+        nodule_summary = (
+            f"{len(findings)} pulmonary nodules "
+            f"measuring {sizes}. "
+        )
+
+    return (
+        f"Lung-RADS Category {category}: {label}. "
+        f"{nodule_summary}"
+        f"{recommendation}"
+    )
+
 
 class NoduleDetector:
     """End-to-end lung nodule detection engine."""

@@ -88,7 +88,7 @@ def train(ctx, epochs, batch_size, lr, resume, checkpoint_dir):
 @click.argument("input_path", type=click.Path(exists=True))
 @click.option("--model", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
 @click.option("--output", "-o", type=click.Path(), help="Output JSON file")
-@click.option("--format", "output_format", type=click.Choice(["json", "text"]), default="text")
+@click.option("--format", "output_format", type=click.Choice(["json", "text", "report"]), default="text")
 @click.pass_context
 def predict(ctx, input_path, model, output, output_format):
     """Run nodule detection on a CT scan.
@@ -133,6 +133,14 @@ def predict(ctx, input_path, model, output, output_format):
             click.echo(f"Results written to {output}")
         else:
             click.echo(json.dumps(result_dict, indent=2))
+    elif output_format == "report":
+        report_text = result.dictation()
+        if output:
+            with open(output, "w") as f:
+                f.write(report_text)
+            click.echo(f"Report written to {output}")
+        else:
+            click.echo(report_text)
     else:
         click.echo(result.summary())
 

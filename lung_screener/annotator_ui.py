@@ -175,6 +175,29 @@ def import_scan(req: ImportRequest):
         raise HTTPException(400, str(e))
 
 
+@_router.get("/api/scans/{series_uid}/report")
+def get_report(series_uid: str):
+    """Generate dictation-ready radiology report text from annotations."""
+    if series_uid not in _dm.manifest["scans"]:
+        raise HTTPException(404, "Scan not found")
+
+    from .inference import NoduleFinding, ScanResult
+
+    scan = _dm.manifest["scans"][series_uid]
+    findings = []
+    for ann in scan.get("annotations", []):
+        findings.append(NoduleFinding(
+            x=ann["coordX"],
+            y=ann["coordY"],
+            z=ann["coordZ"],
+            diameter_mm=ann["diameter_mm"],
+            confidence=1.0,
+        ))
+
+    result = ScanResult(series_uid=series_uid, findings=findings)
+    return {"report": result.dictation()}
+
+
 @_router.post("/api/prepare")
 def prepare_training_data():
     try:
@@ -321,7 +344,7 @@ _FRONTEND_HTML = """<!DOCTYPE html>
   canvas { cursor: crosshair; }
 
   /* Annotation panel */
-  #ann-panel { width: 280px; background: #16213e; padding: 16px; overflow-y: auto;
+  #ann-panel { width: 320px; background: #16213e; padding: 16px; overflow-y: auto;
                border-left: 1px solid #0f3460; }
   .ann-item { background: #0d1b36; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px;
               font-size: 12px; position: relative; }
@@ -332,6 +355,15 @@ _FRONTEND_HTML = """<!DOCTYPE html>
 
   #diameter-input { width: 80px; padding: 4px 8px; background: #0d1b36; border: 1px solid #333;
                     border-radius: 4px; color: #fff; font-size: 13px; }
+
+  /* Report panel */
+  #report-box { background: #0d1b36; border-radius: 6px; padding: 12px; margin-top: 8px;
+                font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.5;
+                white-space: pre-wrap; color: #e0e0e0; max-height: 300px; overflow-y: auto;
+                border: 1px solid #333; display: none; }
+  .btn-copy { background: #9b59b6; color: #fff; }
+  .btn-copy:hover { background: #b06fcf; }
+  .copied-flash { background: #2ecc71 !important; }
 
   /* Empty state */
   .empty-state { text-align: center; padding: 40px 20px; color: #555; }
@@ -399,6 +431,15 @@ _FRONTEND_HTML = """<!DOCTYPE html>
       Mark as Negative (No Nodules)
     </button>
   </div>
+
+  <div class="section-title" style="margin-top:20px;">Dictation Report</div>
+  <button class="btn btn-copy btn-block btn-sm" onclick="generateReport()" id="report-btn" style="display:none;">
+    Generate Report
+  </button>
+  <div id="report-box"></div>
+  <button class="btn btn-copy btn-block btn-sm" onclick="copyReport()" id="copy-btn" style="display:none;">
+    Copy to Clipboard
+  </button>
 </div>
 
 <script>
@@ -455,6 +496,9 @@ async function selectScan(uid) {
   currentSlice = parseInt(slider.value);
 
   document.getElementById('mark-neg-btn').style.display = 'block';
+  document.getElementById('report-btn').style.display = 'block';
+  document.getElementById('report-box').style.display = 'none';
+  document.getElementById('copy-btn').style.display = 'none';
   await loadSlice(currentSlice);
   renderAnnotations();
   loadScans();
@@ -663,6 +707,43 @@ async function prepareData() {
     alert('Training data prepared at: ' + result.dataset_dir);
     setStatus('Training data ready at ' + result.dataset_dir);
   } catch (e) { alert('Prepare failed: ' + e.message); setStatus('Prepare failed'); }
+}
+
+async function generateReport() {
+  if (!currentScan) return;
+  setStatus('Generating report...');
+  try {
+    const result = await api('GET', '/api/scans/' + currentScan.series_uid + '/report');
+    const box = document.getElementById('report-box');
+    box.textContent = result.report;
+    box.style.display = 'block';
+    document.getElementById('copy-btn').style.display = 'block';
+    setStatus('Report generated. Click "Copy to Clipboard" to paste into dictation software.');
+  } catch (e) { alert('Report failed: ' + e.message); setStatus('Report generation failed'); }
+}
+
+async function copyReport() {
+  const box = document.getElementById('report-box');
+  const text = box.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    const btn = document.getElementById('copy-btn');
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied-flash');
+    setTimeout(() => { btn.textContent = 'Copy to Clipboard'; btn.classList.remove('copied-flash'); }, 2000);
+    setStatus('Report copied to clipboard. Paste into your dictation software.');
+  } catch (e) {
+    // Fallback for non-HTTPS contexts
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    setStatus('Report copied to clipboard.');
+  }
 }
 
 function changeWindow() {
