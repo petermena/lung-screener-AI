@@ -192,6 +192,34 @@ def export_model(ctx, checkpoint, output):
     click.echo("Use with: lung-screener predict /path/to/scan -m model.onnx")
 
 
+@main.command(name="annotate")
+@click.option("--data-dir", default="./data/training", help="Training data directory")
+@click.option("--port", "-p", type=int, default=8888, help="Web UI port")
+@click.pass_context
+def annotate_ui(ctx, data_dir, port):
+    """Launch the browser-based annotation tool.
+
+    Opens a local web UI where you can import DICOM scans, scroll
+    through slices, click to mark nodules, and prepare training data.
+
+    \b
+    Example:
+        lung-screener annotate
+        lung-screener annotate --port 9000
+    """
+    import uvicorn
+
+    from .annotator_ui import create_app
+
+    config = ctx.obj["config"]
+    app = create_app(data_dir, config)
+
+    click.echo(f"Starting annotation tool at http://localhost:{port}")
+    click.echo("Open this URL in your browser to begin annotating.")
+    click.echo("Press Ctrl+C to stop.")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+
 @main.group()
 @click.option("--data-dir", default="./data/training", help="Training data directory")
 @click.pass_context
