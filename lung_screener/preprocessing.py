@@ -295,6 +295,7 @@ class CTPreprocessor:
         Returns:
             Dict with keys:
                 - volume: preprocessed normalized volume
+                - volume_hu: raw Hounsfield Unit volume (for calcification analysis)
                 - lung_mask: binary lung segmentation
                 - candidates: list of candidate dicts
                 - spacing: final voxel spacing
@@ -322,6 +323,7 @@ class CTPreprocessor:
 
         return {
             "volume": volume,
+            "volume_hu": volume_hu,
             "lung_mask": lung_mask,
             "candidates": candidates,
             "spacing": spacing,

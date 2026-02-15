@@ -5,8 +5,9 @@ Handles end-to-end prediction on new CT scans:
 2. Detect candidates
 3. Classify each candidate
 4. Determine nodule type (solid, part-solid, ground-glass)
-5. Apply non-maximum suppression
-6. Generate structured findings with type-aware Lung-RADS
+5. Analyze calcification patterns (granuloma vs true nodule)
+6. Apply non-maximum suppression
+7. Generate structured findings with type-aware Lung-RADS
 """
 
 import logging
@@ -18,6 +19,11 @@ import SimpleITK as sitk
 import torch
 from torch.cuda.amp import autocast
 
+from .calcification import (
+    BENIGN_PATTERNS,
+    CalcificationResult,
+    analyze_calcification,
+)
 from .model import NODULE_TYPES, build_model
 from .preprocessing import CTPreprocessor, extract_patch
 from .risk_model import compute_lung_rads_with_risk
@@ -49,10 +55,15 @@ class NoduleFinding:
     series_uid: str = ""
     # Nodule type: "solid", "part_solid", or "ground_glass"
     nodule_type: str = "solid"
+    # Calcification analysis result (None if not analyzed)
+    calcification: CalcificationResult | None = None
 
     def __post_init__(self):
         if not self.lung_rads:
             self.lung_rads = self._compute_lung_rads()
+        # Apply Lung-RADS override for benign calcification
+        if self.calcification and self.calcification.suggested_lung_rads_override:
+            self.lung_rads = self.calcification.suggested_lung_rads_override
 
     def _compute_lung_rads(self) -> str:
         """Assign Lung-RADS category based on nodule diameter and type.
@@ -65,7 +76,7 @@ class NoduleFinding:
         return compute_lung_rads_with_risk(self.diameter_mm, self.nodule_type)
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "location_mm": {"x": self.x, "y": self.y, "z": self.z},
             "diameter_mm": round(self.diameter_mm, 1),
             "confidence": round(self.confidence, 3),
@@ -76,6 +87,9 @@ class NoduleFinding:
             "series_uid": self.series_uid,
             "nodule_type": self.nodule_type,
         }
+        if self.calcification:
+            result["calcification"] = self.calcification.to_dict()
+        return result
 
 
 def estimate_lobe(
@@ -168,11 +182,16 @@ class ScanResult:
         lines.append("")
 
         for i, f in enumerate(self.findings, 1):
+            calc_info = ""
+            if f.calcification and f.calcification.pattern.value != "none":
+                calc_info = f", calcification={f.calcification.pattern.value}"
+                if f.calcification.is_benign:
+                    calc_info += " (BENIGN)"
             lines.append(
                 f"  Finding {i}: {f.diameter_mm:.1f}mm {f.nodule_type} nodule at "
                 f"({f.x:.1f}, {f.y:.1f}, {f.z:.1f})mm, "
                 f"confidence={f.confidence:.1%}, "
-                f"Lung-RADS {f.lung_rads}"
+                f"Lung-RADS {f.lung_rads}{calc_info}"
             )
 
         if not self.findings:
@@ -231,8 +250,19 @@ class ScanResult:
             nodule_desc = f"{i}. {lobe_text}: "
             nodule_desc += f"A {f.diameter_mm:.0f} mm {type_desc} pulmonary nodule"
 
+            # Calcification description
+            if f.calcification and f.calcification.is_benign:
+                nodule_desc += (
+                    f" with {f.calcification.pattern.value} calcification, "
+                    "consistent with benign etiology"
+                )
+            elif f.calcification and f.calcification.pattern.value not in ("none", "partial"):
+                nodule_desc += f" with {f.calcification.pattern.value} calcification"
+
             # Malignancy risk language
-            if f.malignancy_score >= 4.0:
+            if f.calcification and f.calcification.is_benign:
+                pass  # Skip malignancy language for benign calcifications
+            elif f.malignancy_score >= 4.0:
                 nodule_desc += ", suspicious for malignancy"
             elif f.malignancy_score >= 3.0:
                 nodule_desc += ", indeterminate"
@@ -393,6 +423,7 @@ class NoduleDetector:
             # Step 1: Preprocess
             processed = self.preprocessor.process_scan(image)
             volume = processed["volume"]
+            volume_hu = processed["volume_hu"]
             candidates = processed["candidates"]
             spacing = processed["spacing"]
             origin = processed["origin"]
@@ -478,7 +509,29 @@ class NoduleDetector:
                         nodule_type=nodule_type,
                     ))
 
-            # Step 5: Non-maximum suppression
+            # Step 5: Calcification analysis on raw HU volume
+            for finding_idx, (finding, cand) in enumerate(
+                zip(findings, [c for c, p in zip(candidates, all_probs) if p >= self.threshold])
+            ):
+                try:
+                    calc_result = analyze_calcification(
+                        volume_hu,
+                        cand["center_voxel"],
+                        cand["diameter_mm"],
+                        spacing,
+                    )
+                    finding.calcification = calc_result
+                    # Override Lung-RADS for benign calcification patterns
+                    if calc_result.suggested_lung_rads_override:
+                        finding.lung_rads = calc_result.suggested_lung_rads_override
+                        logger.info(
+                            f"Finding {finding_idx}: {calc_result.pattern.value} calcification "
+                            f"→ Lung-RADS overridden to {calc_result.suggested_lung_rads_override}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Calcification analysis failed for finding {finding_idx}: {e}")
+
+            # Step 6: Non-maximum suppression
             findings = self._nms(findings)
 
             logger.info(f"Detected {len(findings)} nodules after NMS")
