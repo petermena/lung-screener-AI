@@ -14,6 +14,23 @@ set -euo pipefail
 DATA_DIR="./data/luna16"
 mkdir -p "$DATA_DIR"
 
+# Extract zip files using whichever tool is available
+extract_zip() {
+    local zip_file="$1"
+    local dest_dir="$2"
+
+    if command -v unzip &>/dev/null; then
+        unzip -q -o "$zip_file" -d "$dest_dir"
+    elif command -v python3 &>/dev/null; then
+        python3 -c "import zipfile, sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zip_file" "$dest_dir"
+    elif command -v python &>/dev/null; then
+        python -c "import zipfile, sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$zip_file" "$dest_dir"
+    else
+        echo "ERROR: No unzip tool found. Install with: apt-get install -y unzip"
+        return 1
+    fi
+}
+
 # Zenodo base URLs
 ZENODO_PART1="https://zenodo.org/records/3723295/files"
 ZENODO_PART2="https://zenodo.org/records/4121926/files"
@@ -80,7 +97,7 @@ for i in "${SUBSETS[@]}"; do
         echo "  Already extracted: $SUBSET_DIR (skipping)"
     else
         echo "  Extracting subset${i}.zip..."
-        unzip -q -o "$ZIP_FILE" -d "$DATA_DIR"
+        extract_zip "$ZIP_FILE" "$DATA_DIR"
         echo "  Done."
     fi
 

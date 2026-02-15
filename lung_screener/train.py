@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -61,7 +61,7 @@ class Trainer:
         )
 
         # Mixed precision
-        self.scaler = GradScaler()
+        self.scaler = GradScaler("cuda", enabled=torch.cuda.is_available())
 
         # Scheduler
         sched_config = train_config.get("scheduler", {})
@@ -148,7 +148,7 @@ class Trainer:
 
             self.optimizer.zero_grad()
 
-            with autocast():
+            with autocast("cuda", enabled=torch.cuda.is_available()):
                 output = self.model(patches)
                 loss = self.criterion(output["logits"], labels)
 
@@ -194,7 +194,7 @@ class Trainer:
             patches = batch["patch"].to(self.device)
             labels = batch["label"].to(self.device)
 
-            with autocast():
+            with autocast("cuda", enabled=torch.cuda.is_available()):
                 output = self.model(patches)
                 loss = self.criterion(output["logits"], labels)
 
@@ -255,7 +255,7 @@ class Trainer:
         tp_rate = np.concatenate([[0], tp_rate])
         fp_rate = np.concatenate([[0], fp_rate])
 
-        auc = np.trapz(tp_rate, fp_rate)
+        auc = np.trapezoid(tp_rate, fp_rate)
         return float(auc)
 
     def save_checkpoint(self, epoch: int, metrics: dict, is_best: bool = False):
