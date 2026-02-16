@@ -28,6 +28,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tqdm>=4.65",
     "click>=8.1",
+    "matplotlib>=3.7",
 ]
 
 [project.optional-dependencies]

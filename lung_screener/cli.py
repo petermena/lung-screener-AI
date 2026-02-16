@@ -634,5 +634,126 @@ def verify(ctx):
         sys.exit(1)
 
 
+@main.command(name="gradcam")
+@click.argument("input_path", type=click.Path(exists=True))
+@click.option("--model", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
+@click.option("--output", "-o", default="./gradcam_output", help="Output directory for saliency maps")
+@click.option("--view", type=click.Choice(["slices", "three-plane", "both"]), default="both",
+              help="Visualization mode")
+@click.option("--num-slices", type=int, default=9, help="Number of axial slices (for 'slices' view)")
+@click.option("--alpha", type=float, default=0.4, help="Heatmap overlay opacity (0-1)")
+@click.option("--max-findings", type=int, default=10, help="Max findings to visualize")
+@click.option("--validate/--no-validate", default=True, help="Validate DICOM input")
+@click.pass_context
+def gradcam(ctx, input_path, model, output, view, num_slices, alpha, max_findings, validate):
+    """Generate GradCAM saliency maps for detected nodules.
+
+    Shows which voxel regions drove the model's nodule prediction —
+    useful for radiologist review and model debugging.
+
+    \b
+    Examples:
+        lung-screener gradcam /path/to/scan -m best.pth
+        lung-screener gradcam scan.mhd -m best.pth --view three-plane
+        lung-screener gradcam /dicom/dir -m best.pth -o ./maps --alpha 0.5
+    """
+    from .gradcam import GradCAM3D, load_model_for_gradcam, render_slices, render_three_plane
+    from .preprocessing import CTPreprocessor, extract_patch, load_dicom_series, load_mhd
+
+    config = ctx.obj["config"]
+    model_path = Path(model)
+    input_path = Path(input_path)
+    output_dir = Path(output)
+
+    # Input validation for DICOM directories
+    if validate and input_path.is_dir():
+        from .input_validation import validate_dicom_series
+
+        validation = validate_dicom_series(input_path)
+        if not validation.is_valid:
+            click.echo(validation.summary(), err=True)
+            sys.exit(1)
+
+    # Load model
+    loaded_model, device = load_model_for_gradcam(config, model_path)
+    gc = GradCAM3D(loaded_model)
+
+    # Load and preprocess scan
+    if input_path.suffix == ".mhd":
+        image = load_mhd(input_path)
+        series_uid = input_path.stem
+    elif input_path.is_dir():
+        image = load_dicom_series(input_path)
+        series_uid = input_path.name
+    else:
+        click.echo(f"Unsupported input: {input_path}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Processing: {series_uid}")
+
+    preprocessor = CTPreprocessor(config)
+    processed = preprocessor.process_scan(image)
+    volume = processed["volume"]
+    candidates = processed["candidates"]
+
+    if not candidates:
+        click.echo("No candidates found in scan.")
+        gc.release()
+        return
+
+    click.echo(f"Found {len(candidates)} candidates, generating saliency maps...")
+
+    patch_size = tuple(config.get("model", {}).get("patch_size", [48, 48, 48]))
+    import numpy as np
+
+    # Classify and generate GradCAM for each candidate
+    count = 0
+    for i, cand in enumerate(candidates):
+        if count >= max_findings:
+            break
+
+        patch = extract_patch(volume, cand["center_voxel"], patch_size)
+        patch_tensor = torch.from_numpy(patch).float().unsqueeze(0).unsqueeze(0).to(device)
+
+        heatmap, prediction = gc.generate(patch_tensor, target_class=1)  # Explain nodule class
+
+        # Only visualize if model thinks it's a nodule or close
+        if prediction["nodule_probability"] < 0.1:
+            continue
+
+        count += 1
+        prefix = f"candidate_{i:03d}"
+        conf = prediction["confidence"]
+        label = "nodule" if prediction["class"] == 1 else "non_nodule"
+
+        click.echo(
+            f"  [{count}] Candidate {i}: {label} "
+            f"(nodule prob: {prediction['nodule_probability']:.1%}, "
+            f"diameter: {cand['diameter_mm']:.1f}mm)"
+        )
+
+        if view in ("slices", "both"):
+            render_slices(
+                patch, heatmap,
+                output_dir / f"{prefix}_slices.png",
+                num_slices=num_slices,
+                alpha=alpha,
+                prediction=prediction,
+            )
+        if view in ("three-plane", "both"):
+            render_three_plane(
+                patch, heatmap,
+                output_dir / f"{prefix}_3plane.png",
+                alpha=alpha,
+                prediction=prediction,
+            )
+
+        # Save raw heatmap as numpy for further analysis
+        np.save(output_dir / f"{prefix}_heatmap.npy", heatmap)
+
+    gc.release()
+    click.echo(f"\nSaved {count} GradCAM visualizations to {output_dir}/")
+
+
 if __name__ == "__main__":
     main()

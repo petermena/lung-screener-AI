@@ -87,6 +87,7 @@ class Trainer:
 
     def create_dataloaders(self) -> tuple[DataLoader, DataLoader]:
         """Create training and validation data loaders."""
+        train_config = self.config.get("training", {})
         data_config = self.config.get("data", {})
         dataset_dir = data_config.get("dataset_dir", "./data/luna16")
         cache_dir = data_config.get("cache_dir", "./data/cache")
@@ -113,21 +114,26 @@ class Trainer:
         logger.info(f"Training samples: {len(train_dataset)}")
         logger.info(f"Validation samples: {len(val_dataset)}")
 
+        num_workers = train_config.get("num_workers", 4)
+        pin_memory = torch.cuda.is_available()
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=4,
-            pin_memory=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             drop_last=True,
+            persistent_workers=num_workers > 0,
         )
 
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=4,
-            pin_memory=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=num_workers > 0,
         )
 
         return train_loader, val_loader

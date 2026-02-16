@@ -31,10 +31,16 @@ candidate_detection:
   max_size_mm: 30.0
 
 training:
+  # -- Tuned for NVIDIA A4000 (16GB VRAM) with mixed precision --
+  # Batch 32 uses ~6-8GB with AMP, leaving headroom for activations.
+  # Increase to 48 if your GPU has >20GB VRAM.
   batch_size: 32
   learning_rate: 0.001
   weight_decay: 0.0001
   epochs: 100
+  # DataLoader workers — 4 is optimal for typical 8-core RunPod pods.
+  # Set to 0 for debugging (runs in main process).
+  num_workers: 4
   # Positive/negative ratio for sampling
   pos_neg_ratio: 1.0
   # Data augmentation
@@ -43,12 +49,13 @@ training:
     flip: true
     scale_range: [0.9, 1.1]
     noise_std: 0.01
-    # Enhanced augmentation (set to true/nonzero to enable)
-    elastic_deformation: false
+    # Elastic deformation improves generalization on LUNA16 (minor speed cost)
+    elastic_deformation: true
     elastic_alpha: 15.0
     elastic_sigma: 3.0
-    intensity_shift: 0.0
-    intensity_scale: 0.0
+    # Intensity perturbation simulates scanner variability
+    intensity_shift: 0.05
+    intensity_scale: 0.05
     mixup_alpha: 0.0
   # Early stopping patience (epochs)
   early_stopping_patience: 15
@@ -62,8 +69,9 @@ inference:
   threshold: 0.5
   # Non-maximum suppression distance in mm
   nms_distance_mm: 10.0
-  # Batch size for inference
-  batch_size: 64
+  # Inference batch size — larger than training since no gradients stored.
+  # A4000 can easily fit 128 patches for forward-only passes.
+  batch_size: 128
   # Input validation (verify chest CT before processing)
   validate_input: true
 
