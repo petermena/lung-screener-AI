@@ -59,26 +59,56 @@ ZENODO_PART1="https://zenodo.org/records/3723295/files"
 ZENODO_PART2="https://zenodo.org/records/4121926/files"
 
 # Download a file with retry logic
+is_valid_zip() {
+    local file="$1"
+    if command -v unzip &>/dev/null; then
+        unzip -t "$file" &>/dev/null
+    elif command -v python3 &>/dev/null; then
+        python3 -c "import zipfile, sys; z=zipfile.ZipFile(sys.argv[1]); z.testzip(); z.close()" "$file" 2>/dev/null
+    else
+        # If we can't test, assume valid
+        return 0
+    fi
+}
+
 download_file() {
     local url="$1"
     local output="$2"
     local max_retries=3
 
     if [ -f "$output" ]; then
-        echo "  Already exists: $output (skipping)"
-        return 0
+        # For zip files, verify integrity; remove if corrupt
+        if [[ "$output" == *.zip ]]; then
+            if is_valid_zip "$output"; then
+                echo "  Already exists (verified): $output (skipping)"
+                return 0
+            else
+                echo "  Corrupt zip detected, re-downloading: $output"
+                rm -f "$output"
+            fi
+        else
+            echo "  Already exists: $output (skipping)"
+            return 0
+        fi
     fi
 
     echo "  Downloading: $(basename "$output")"
     for attempt in $(seq 1 $max_retries); do
-        if curl -L -C - --progress-bar -o "$output" "${url}?download=1"; then
-            return 0
+        if curl -L --progress-bar -o "$output" "${url}?download=1"; then
+            # Verify zip integrity after download
+            if [[ "$output" == *.zip ]] && ! is_valid_zip "$output"; then
+                echo "  Downloaded file is corrupt, retrying..."
+                rm -f "$output"
+            else
+                return 0
+            fi
         fi
         echo "  Retry $attempt/$max_retries..."
         sleep $((attempt * 2))
     done
 
     echo "  FAILED: $output"
+    rm -f "$output"  # Clean up failed download
     return 1
 }
 
