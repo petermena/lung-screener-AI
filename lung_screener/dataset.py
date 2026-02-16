@@ -4,6 +4,7 @@ Handles loading annotations, creating train/val splits, and providing
 3D patches with enhanced data augmentation for training.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -177,10 +178,16 @@ class LUNA16Dataset(Dataset):
         result = self.preprocessor.process_scan(image)
         volume = result["volume"]
 
-        # Save to disk cache
+        # Save to disk cache (atomic write to avoid corruption from parallel workers)
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            np.save(self.cache_dir / f"{seriesuid}.npy", volume)
+            tmp_path = self.cache_dir / f"{seriesuid}.npy.tmp.{os.getpid()}"
+            cache_path = self.cache_dir / f"{seriesuid}.npy"
+            np.save(tmp_path, volume)
+            try:
+                os.replace(tmp_path, cache_path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
 
         # Keep in memory cache (limit to ~10 volumes to avoid OOM)
         if len(self._volume_cache) < 10:

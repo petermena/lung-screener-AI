@@ -1,0 +1,6 @@
+# Override config for training on synthetic data (CPU, no multiprocessing)
+training:
+  num_workers: 0
+  epochs: 5
+  batch_size: 8
+  early_stopping_patience: 10

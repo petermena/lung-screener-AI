@@ -66,11 +66,12 @@ class Trainer:
         # Scheduler
         sched_config = train_config.get("scheduler", {})
         warmup_epochs = sched_config.get("warmup_epochs", 5)
+        warmup_epochs = min(warmup_epochs, max(self.epochs - 1, 0))
         warmup_scheduler = LinearLR(
-            self.optimizer, start_factor=0.1, total_iters=warmup_epochs
+            self.optimizer, start_factor=0.1, total_iters=max(warmup_epochs, 1)
         )
         cosine_scheduler = CosineAnnealingLR(
-            self.optimizer, T_max=self.epochs - warmup_epochs
+            self.optimizer, T_max=max(self.epochs - warmup_epochs, 1)
         )
         self.scheduler = SequentialLR(
             self.optimizer,
