@@ -10,8 +10,9 @@
 # survives pod stop/restart. The script auto-detects RunPod and uses
 # /workspace/luna16 as the data directory, with a symlink at ./data/luna16.
 #
-# Source: https://zenodo.org/records/3723295 (Part 1)
-#         https://zenodo.org/records/4121926 (Part 2)
+# Source: https://zenodo.org/records/3723295 (Part 1: subsets 0-4)
+#         https://zenodo.org/records/4121926 (Part 2: subsets 5-9)
+# Uses Zenodo API download format (post-Oct 2023 platform upgrade).
 
 set -euo pipefail
 
@@ -54,9 +55,11 @@ extract_zip() {
     fi
 }
 
-# Zenodo base URLs
-ZENODO_PART1="https://zenodo.org/records/3723295/files"
-ZENODO_PART2="https://zenodo.org/records/4121926/files"
+# Zenodo API base URLs (post-Oct 2023 platform upgrade)
+# Old format /records/{ID}/files/{FILE}?download=1 returns HTML, not the file.
+# New format /api/records/{ID}/files/{FILE}/content returns the actual file.
+ZENODO_PART1="https://zenodo.org/api/records/3723295/files"
+ZENODO_PART2="https://zenodo.org/api/records/4121926/files"
 
 # Download a file with retry logic
 is_valid_zip() {
@@ -101,14 +104,14 @@ download_file() {
                 -C - \
                 --retry 3 --retry-delay 5 --retry-max-time 120 \
                 --connect-timeout 30 \
-                -o "$output" "${url}?download=1"; then
+                -o "$output" "${url}/content"; then
             # Log file size for diagnostics
             local file_size
             file_size=$(stat -c%s "$output" 2>/dev/null || echo "0")
             echo "  Downloaded $(basename "$output"): ${file_size} bytes"
 
-            # Tiny files are likely HTML error pages, not real data
-            if [[ "$output" == *.zip ]] && [ "$file_size" -lt 1000 ]; then
+            # Subset zips are multi-GB; small files are HTML error pages
+            if [[ "$output" == *.zip ]] && [ "$file_size" -lt 1000000 ]; then
                 echo "  File too small (${file_size} bytes) — likely an error page, retrying..."
                 rm -f "$output"
             elif [[ "$output" == *.zip ]] && ! is_valid_zip "$output"; then
