@@ -95,6 +95,9 @@ data:
   cache_dir: "./data/cache"
   # Train/val split ratio
   val_split: 0.2
+  # Cap validation candidates for faster epochs (0 = no cap, use all).
+  # Keeps all positives and subsamples negatives to this total.
+  max_val_candidates: 5000
   # Directory for manually imported DICOM scans & annotations
   training_dir: "./data/training"
 

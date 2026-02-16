@@ -127,6 +127,11 @@ class LUNA16Dataset(Dataset):
         # Balance positive/negative samples for training
         if self.split == "train":
             samples = self._balance_samples(samples)
+        else:
+            # Cap validation candidates for faster evaluation
+            max_val = self.config.get("data", {}).get("max_val_candidates", 0)
+            if max_val > 0 and len(samples) > max_val:
+                samples = self._subsample_val(samples, max_val)
 
         return samples
 
@@ -144,6 +149,19 @@ class LUNA16Dataset(Dataset):
         if len(negatives) > max_negatives:
             np.random.seed(42)
             indices = np.random.choice(len(negatives), max_negatives, replace=False)
+            negatives = [negatives[i] for i in indices]
+
+        return positives + negatives
+
+    def _subsample_val(self, samples: list[dict], max_candidates: int) -> list[dict]:
+        """Subsample validation set while keeping all positives."""
+        positives = [s for s in samples if s["label"] == 1]
+        negatives = [s for s in samples if s["label"] == 0]
+
+        max_neg = max(max_candidates - len(positives), 0)
+        if len(negatives) > max_neg:
+            np.random.seed(42)
+            indices = np.random.choice(len(negatives), max_neg, replace=False)
             negatives = [negatives[i] for i in indices]
 
         return positives + negatives
