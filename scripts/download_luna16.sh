@@ -10,8 +10,8 @@
 # survives pod stop/restart. The script auto-detects RunPod and uses
 # /workspace/luna16 as the data directory, with a symlink at ./data/luna16.
 #
-# Source: https://zenodo.org/records/3723295 (Part 1: subsets 0-4)
-#         https://zenodo.org/records/4121926 (Part 2: subsets 5-9)
+# Source: https://zenodo.org/records/3723295 (Part 1: subsets 0-6)
+#         https://zenodo.org/records/4121926 (Part 2: subsets 7-9)
 # Uses Zenodo API download format (post-Oct 2023 platform upgrade).
 
 set -euo pipefail
@@ -159,8 +159,8 @@ for i in "${SUBSETS[@]}"; do
     echo ""
     echo "--- Subset $i ---"
 
-    # Subsets 0-4 are in Part 1, subsets 5-9 are in Part 2
-    if [ "$i" -le 4 ]; then
+    # Subsets 0-6 are in Part 1, subsets 7-9 are in Part 2
+    if [ "$i" -le 6 ]; then
         BASE_URL="$ZENODO_PART1"
     else
         BASE_URL="$ZENODO_PART2"
