@@ -6,12 +6,35 @@
 #   ./scripts/download_luna16.sh              # Download all subsets (~100GB)
 #   ./scripts/download_luna16.sh 0 1          # Download only subset0 and subset1
 #
+# On RunPod, data is stored on the persistent volume (/workspace) so it
+# survives pod stop/restart. The script auto-detects RunPod and uses
+# /workspace/luna16 as the data directory, with a symlink at ./data/luna16.
+#
 # Source: https://zenodo.org/records/3723295 (Part 1)
 #         https://zenodo.org/records/4121926 (Part 2)
 
 set -euo pipefail
 
-DATA_DIR="./data/luna16"
+# Auto-detect RunPod: use persistent volume so data survives pod restarts
+if [ -d "/workspace" ]; then
+    DATA_DIR="/workspace/luna16"
+    LINK_DIR="./data/luna16"
+    echo "=== RunPod detected: storing data on persistent volume ==="
+    echo "    Data dir:  $DATA_DIR"
+    echo "    Symlink:   $LINK_DIR -> $DATA_DIR"
+    mkdir -p "$DATA_DIR"
+    mkdir -p "$(dirname "$LINK_DIR")"
+    # Create symlink so the project config (data.dataset_dir: ./data/luna16) works
+    if [ ! -L "$LINK_DIR" ] && [ ! -d "$LINK_DIR" ]; then
+        ln -s "$DATA_DIR" "$LINK_DIR"
+    elif [ -d "$LINK_DIR" ] && [ ! -L "$LINK_DIR" ]; then
+        echo "    WARNING: ./data/luna16 is a real directory, not a symlink."
+        echo "    Data will be saved to /workspace/luna16."
+        echo "    You may want to: rm -rf ./data/luna16 && ln -s /workspace/luna16 ./data/luna16"
+    fi
+else
+    DATA_DIR="./data/luna16"
+fi
 mkdir -p "$DATA_DIR"
 
 # Extract zip files using whichever tool is available
