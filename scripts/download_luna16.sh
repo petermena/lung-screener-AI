@@ -74,7 +74,7 @@ is_valid_zip() {
 download_file() {
     local url="$1"
     local output="$2"
-    local max_retries=3
+    local max_retries=5
 
     if [ -f "$output" ]; then
         # For zip files, verify integrity; remove if corrupt
@@ -83,7 +83,9 @@ download_file() {
                 echo "  Already exists (verified): $output (skipping)"
                 return 0
             else
-                echo "  Corrupt zip detected, re-downloading: $output"
+                local bad_size
+                bad_size=$(stat -c%s "$output" 2>/dev/null || echo "unknown")
+                echo "  Corrupt zip detected (${bad_size} bytes), re-downloading: $output"
                 rm -f "$output"
             fi
         else
@@ -94,20 +96,42 @@ download_file() {
 
     echo "  Downloading: $(basename "$output")"
     for attempt in $(seq 1 $max_retries); do
-        if curl -L --progress-bar -o "$output" "${url}?download=1"; then
-            # Verify zip integrity after download
-            if [[ "$output" == *.zip ]] && ! is_valid_zip "$output"; then
-                echo "  Downloaded file is corrupt, retrying..."
+        # Use -C - to resume partial downloads, --retry for transient HTTP errors
+        if curl -L --progress-bar \
+                -C - \
+                --retry 3 --retry-delay 5 --retry-max-time 120 \
+                --connect-timeout 30 \
+                -o "$output" "${url}?download=1"; then
+            # Log file size for diagnostics
+            local file_size
+            file_size=$(stat -c%s "$output" 2>/dev/null || echo "0")
+            echo "  Downloaded $(basename "$output"): ${file_size} bytes"
+
+            # Tiny files are likely HTML error pages, not real data
+            if [[ "$output" == *.zip ]] && [ "$file_size" -lt 1000 ]; then
+                echo "  File too small (${file_size} bytes) — likely an error page, retrying..."
+                rm -f "$output"
+            elif [[ "$output" == *.zip ]] && ! is_valid_zip "$output"; then
+                echo "  Downloaded file is corrupt (${file_size} bytes), retrying..."
                 rm -f "$output"
             else
                 return 0
             fi
+        else
+            echo "  curl failed (exit code $?)"
+            # Don't remove partial file — next attempt will resume with -C -
         fi
-        echo "  Retry $attempt/$max_retries..."
-        sleep $((attempt * 2))
+
+        if [ "$attempt" -lt "$max_retries" ]; then
+            local wait_secs=$((2 ** attempt))
+            echo "  Retry $((attempt + 1))/$max_retries in ${wait_secs}s..."
+            sleep "$wait_secs"
+        fi
     done
 
-    echo "  FAILED: $output"
+    local final_size
+    final_size=$(stat -c%s "$output" 2>/dev/null || echo "0")
+    echo "  FAILED: $output (${final_size} bytes after $max_retries attempts)"
     rm -f "$output"  # Clean up failed download
     return 1
 }
