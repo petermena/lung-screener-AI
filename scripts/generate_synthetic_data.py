@@ -182,7 +182,7 @@ def generate_negative_candidates(
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic LUNA16 data")
     parser.add_argument("--num-scans", type=int, default=20, help="Number of synthetic scans")
-    parser.add_argument("--output-dir", type=str, default="./data/luna16", help="Output directory")
+    parser.add_argument("--output-dir", type=str, default="./data/synthetic", help="Output directory (default: ./data/synthetic to avoid overwriting real data)")
     parser.add_argument("--volume-size", type=int, default=128, help="Volume size (cubic)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
@@ -255,15 +255,27 @@ def main():
         status = f"  Scan {i+1:3d}/{args.num_scans}: {seriesuid} — {num_nodules} nodules, {len(neg_candidates)} neg candidates"
         print(status)
 
-    # Write annotations.csv
+    # Write annotations.csv (back up existing file first)
     ann_path = output_dir / "annotations.csv"
+    if ann_path.exists():
+        backup = ann_path.with_suffix(".csv.real_backup")
+        if not backup.exists():
+            import shutil
+            shutil.copy2(ann_path, backup)
+            print(f"  Backed up existing {ann_path} -> {backup}")
     with open(ann_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["seriesuid", "coordX", "coordY", "coordZ", "diameter_mm"])
         writer.writeheader()
         writer.writerows(all_annotations)
 
-    # Write candidates_V2.csv
+    # Write candidates_V2.csv (back up existing file first)
     cand_path = output_dir / "candidates_V2.csv"
+    if cand_path.exists():
+        backup = cand_path.with_suffix(".csv.real_backup")
+        if not backup.exists():
+            import shutil
+            shutil.copy2(cand_path, backup)
+            print(f"  Backed up existing {cand_path} -> {backup}")
     with open(cand_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["seriesuid", "coordX", "coordY", "coordZ", "class"])
         writer.writeheader()
