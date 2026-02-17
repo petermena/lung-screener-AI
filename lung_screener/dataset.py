@@ -183,7 +183,7 @@ class LUNA16Dataset(Dataset):
         if self.cache_dir:
             cache_path = self.cache_dir / f"{seriesuid}.npy"
             if cache_path.exists():
-                volume = np.load(cache_path)
+                volume = np.load(cache_path).astype(np.float32)
                 self._volume_cache[seriesuid] = volume
                 return volume
 
@@ -201,7 +201,7 @@ class LUNA16Dataset(Dataset):
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             tmp_path = self.cache_dir / f"{seriesuid}.npy.tmp.{os.getpid()}"
             cache_path = self.cache_dir / f"{seriesuid}.npy"
-            np.save(tmp_path, volume)
+            np.save(tmp_path, volume.astype(np.float16))
             try:
                 os.replace(tmp_path, cache_path)
             except OSError:
