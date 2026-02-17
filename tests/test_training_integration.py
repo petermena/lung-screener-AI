@@ -328,8 +328,9 @@ class TestCheckpointing:
 
         # Load into a fresh trainer
         trainer2 = Trainer(fast_config, checkpoint_dir=tmp_path / "ckpts2")
-        epoch = trainer2.load_checkpoint(ckpt_dir / "best.pth")
+        epoch, phase = trainer2.load_checkpoint(ckpt_dir / "best.pth")
         assert epoch == 3
+        assert phase == "complete"
 
     def test_best_checkpoint_only_saved_when_best(self, fast_config, tmp_path):
         ckpt_dir = tmp_path / "ckpts"

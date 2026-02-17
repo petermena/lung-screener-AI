@@ -265,15 +265,32 @@ class Trainer:
         auc = np.trapezoid(tp_rate, fp_rate)
         return float(auc)
 
-    def save_checkpoint(self, epoch: int, metrics: dict, is_best: bool = False):
-        """Save model checkpoint."""
+    def save_checkpoint(
+        self,
+        epoch: int,
+        metrics: dict,
+        is_best: bool = False,
+        phase: str = "complete",
+    ):
+        """Save model checkpoint.
+
+        Args:
+            epoch: Current epoch number.
+            metrics: Metrics dict (train or val depending on phase).
+            is_best: Whether this is the best model so far.
+            phase: One of "train_done" (training phase finished, validation pending)
+                   or "complete" (both phases finished).
+        """
         checkpoint = {
             "epoch": epoch,
+            "phase": phase,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "metrics": metrics,
             "config": self.config,
+            "best_val_auc": self.best_val_auc,
+            "epochs_without_improvement": self.epochs_without_improvement,
         }
 
         # Save latest
@@ -283,15 +300,28 @@ class Trainer:
             torch.save(checkpoint, self.checkpoint_dir / "best.pth")
             logger.info(f"  Saved new best model (AUC: {metrics['auc']:.4f})")
 
-    def load_checkpoint(self, path: str | Path) -> int:
-        """Load a checkpoint and return the epoch number."""
+    def load_checkpoint(self, path: str | Path) -> tuple[int, str]:
+        """Load a checkpoint and return (epoch number, phase).
+
+        Returns:
+            Tuple of (epoch, phase) where phase is "train_done" if the
+            training phase completed but validation hasn't run yet, or
+            "complete" if the full epoch finished.
+        """
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if "scheduler_state_dict" in checkpoint:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        self.best_val_auc = checkpoint.get("metrics", {}).get("auc", 0.0)
-        return checkpoint.get("epoch", 0)
+        self.best_val_auc = checkpoint.get(
+            "best_val_auc",
+            checkpoint.get("metrics", {}).get("auc", 0.0),
+        )
+        self.epochs_without_improvement = checkpoint.get(
+            "epochs_without_improvement", 0
+        )
+        phase = checkpoint.get("phase", "complete")
+        return checkpoint.get("epoch", 0), phase
 
     def train(self, resume_from: str | Path | None = None):
         """Run the full training loop.
@@ -301,23 +331,49 @@ class Trainer:
         """
         train_loader, val_loader = self.create_dataloaders()
         start_epoch = 0
+        skip_training_phase = False
+
+        resumed_train_metrics = None
 
         if resume_from:
-            start_epoch = self.load_checkpoint(resume_from) + 1
-            logger.info(f"Resumed from epoch {start_epoch}")
+            start_epoch, phase = self.load_checkpoint(resume_from)
+            if phase == "train_done":
+                # Training finished but validation didn't run — resume at validation
+                skip_training_phase = True
+                # Load train metrics saved in the intermediate checkpoint
+                ckpt = torch.load(resume_from, map_location="cpu", weights_only=False)
+                resumed_train_metrics = ckpt.get("metrics", {})
+                logger.info(
+                    f"Resumed epoch {start_epoch + 1} after training phase "
+                    f"(skipping to validation)"
+                )
+            else:
+                # Full epoch was complete, move to next epoch
+                start_epoch += 1
+                logger.info(f"Resumed from epoch {start_epoch + 1}")
 
         logger.info(f"Starting training for {self.epochs} epochs")
 
         for epoch in range(start_epoch, self.epochs):
             logger.info(f"Epoch {epoch + 1}/{self.epochs}")
 
-            # Train
-            train_metrics = self.train_epoch(train_loader)
-            logger.info(
-                f"  Train - Loss: {train_metrics['loss']:.4f}, "
-                f"Acc: {train_metrics['accuracy']:.4f}, "
-                f"AUC: {train_metrics['auc']:.4f}"
-            )
+            # Train (skip if resuming mid-epoch after training was already done)
+            if skip_training_phase:
+                train_metrics = resumed_train_metrics
+                logger.info("  Train - skipped (already completed before interruption)")
+                skip_training_phase = False
+            else:
+                train_metrics = self.train_epoch(train_loader)
+                logger.info(
+                    f"  Train - Loss: {train_metrics['loss']:.4f}, "
+                    f"Acc: {train_metrics['accuracy']:.4f}, "
+                    f"AUC: {train_metrics['auc']:.4f}"
+                )
+
+                # Save intermediate checkpoint so validation can be resumed
+                self.save_checkpoint(
+                    epoch, train_metrics, is_best=False, phase="train_done"
+                )
 
             # Validate
             val_metrics = self.validate(val_loader)
@@ -344,7 +400,7 @@ class Trainer:
             else:
                 self.epochs_without_improvement += 1
 
-            # Save checkpoint
+            # Save checkpoint (full epoch complete)
             self.save_checkpoint(epoch, val_metrics, is_best)
 
             # Early stopping
