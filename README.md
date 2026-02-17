@@ -122,12 +122,32 @@ This system is designed to train on the [LUNA16](https://luna16.grand-challenge.
 
 ## Lung-RADS Categories
 
-The system assigns [ACR Lung-RADS v2022](https://www.acr.org/Clinical-Resources/Reporting-and-Data-Systems/Lung-Rads) categories:
+The system assigns [ACR Lung-RADS v2022](https://www.acr.org/Clinical-Resources/Reporting-and-Data-Systems/Lung-Rads) categories with type-specific thresholds for solid, part-solid, and ground-glass nodules.
 
-| Category | Criteria | Recommendation |
-|----------|----------|----------------|
-| 1 | No nodules | Continue annual screening |
-| 2 | Solid nodule <6mm | Continue annual screening |
-| 3 | Solid nodule 6-8mm | 6-month follow-up |
-| 4A | Solid nodule 8-15mm | 3-month follow-up or PET/CT |
-| 4B | Solid nodule ≥15mm | Tissue sampling |
+### Solid Nodules
+
+| Category | Size | Recommendation |
+|----------|------|----------------|
+| 1 | No nodules | Continue annual screening with LDCT in 12 months |
+| 2 | <6mm | Continue annual screening with LDCT in 12 months |
+| 3 | 6–8mm | Short-term follow-up — LDCT in 6 months |
+| 4A | 8–15mm | LDCT in 3 months, PET/CT may be considered |
+| 4B | ≥15mm | Tissue sampling and/or PET/CT; multidisciplinary consultation |
+
+### Part-Solid (Subsolid) Nodules
+
+| Category | Size | Recommendation |
+|----------|------|----------------|
+| 2 | <6mm total | Continue annual screening with LDCT in 12 months |
+| 3 | ≥6mm total, solid component <6mm | Short-term follow-up — LDCT in 6 months |
+| 4A | Solid component 6–8mm | LDCT in 3 months, PET/CT may be considered |
+| 4B | Solid component ≥8mm | Tissue sampling and/or PET/CT; multidisciplinary consultation |
+
+### Ground-Glass Nodules (GGN)
+
+| Category | Size | Recommendation |
+|----------|------|----------------|
+| 2 | <30mm | Continue annual screening with LDCT in 12 months |
+| 3 | ≥30mm | Short-term follow-up — LDCT in 6 months |
+
+> **Risk-based upgrade:** When a Brock/PanCan malignancy probability ≥15% is computed, a Category 3 nodule is automatically upgraded to 4A regardless of type.
