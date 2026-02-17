@@ -366,9 +366,13 @@ _FRONTEND_HTML = """<!DOCTYPE html>
   #slice-slider { flex: 1; }
   #slice-info { font-size: 13px; font-family: monospace; min-width: 120px; }
 
-  #canvas-wrap { flex: 1; position: relative; display: flex; align-items: center;
-                 justify-content: center; overflow: hidden; background: #000; }
-  canvas { cursor: crosshair; }
+  #canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #000; }
+  canvas { cursor: crosshair; position: absolute; top: 0; left: 0; }
+
+  /* Zoom controls */
+  .zoom-controls { display: flex; align-items: center; gap: 6px; margin-left: 12px; }
+  .zoom-controls .btn { padding: 3px 8px; font-size: 11px; }
+  #zoom-level { font-size: 12px; font-family: monospace; min-width: 44px; text-align: center; color: #00d4ff; }
 
   /* Annotation panel */
   #ann-panel { width: 320px; background: #16213e; padding: 16px; overflow-y: auto;
@@ -438,6 +442,13 @@ _FRONTEND_HTML = """<!DOCTYPE html>
       <option value="40,400">Mediastinum</option>
       <option value="-600,600">Soft Tissue</option>
     </select>
+    <div class="zoom-controls">
+      <label>Zoom:</label>
+      <button class="btn btn-primary" onclick="zoomIn()">+</button>
+      <span id="zoom-level">100%</span>
+      <button class="btn btn-primary" onclick="zoomOut()">&minus;</button>
+      <button class="btn btn-sm" style="background:#555;color:#fff;" onclick="resetZoom()">Fit</button>
+    </div>
   </div>
 
   <div id="canvas-wrap">
@@ -475,12 +486,111 @@ const ctx = canvas.getContext('2d');
 const slider = document.getElementById('slice-slider');
 const sliceInfo = document.getElementById('slice-info');
 const tooltip = document.getElementById('tooltip');
+const canvasWrap = document.getElementById('canvas-wrap');
 
 let currentScan = null;
 let volumeInfo = null;
 let currentSlice = 0;
 let sliceImage = null;
 let annotations = [];
+
+// Zoom & pan state
+let zoom = 1;       // user zoom multiplier (on top of baseZoom)
+let baseZoom = 1;   // auto-fit scale
+let panX = 0, panY = 0;
+
+// Pan drag state
+let isPanning = false;
+let panDragStartX, panDragStartY, panOriginX, panOriginY;
+
+// Slice image cache for smooth scrolling
+const sliceCache = new Map();
+const PRELOAD_RANGE = 8;
+const MAX_CACHE_SIZE = 30;
+
+// ---- Canvas sizing ----
+function resizeCanvas() {
+  canvas.width = canvasWrap.clientWidth;
+  canvas.height = canvasWrap.clientHeight;
+  if (sliceImage) {
+    fitToScreen();
+    drawFrame();
+  }
+}
+new ResizeObserver(resizeCanvas).observe(canvasWrap);
+
+function fitToScreen() {
+  if (!sliceImage) return;
+  const sx = canvas.width / sliceImage.width;
+  const sy = canvas.height / sliceImage.height;
+  baseZoom = Math.min(sx, sy);
+  zoom = 1;
+  panX = (canvas.width - sliceImage.width * baseZoom) / 2;
+  panY = (canvas.height - sliceImage.height * baseZoom) / 2;
+}
+
+function resetZoom() {
+  fitToScreen();
+  drawFrame();
+  updateZoomDisplay();
+}
+
+function zoomIn() {
+  applyZoomAt(canvas.width / 2, canvas.height / 2, 1.25);
+}
+
+function zoomOut() {
+  applyZoomAt(canvas.width / 2, canvas.height / 2, 0.8);
+}
+
+function applyZoomAt(cx, cy, factor) {
+  const oldZoom = zoom;
+  zoom = Math.max(0.25, Math.min(15, zoom * factor));
+  const oldScale = baseZoom * oldZoom;
+  const newScale = baseZoom * zoom;
+  panX = cx - (cx - panX) * (newScale / oldScale);
+  panY = cy - (cy - panY) * (newScale / oldScale);
+  drawFrame();
+  updateZoomDisplay();
+}
+
+function updateZoomDisplay() {
+  document.getElementById('zoom-level').textContent = Math.round(baseZoom * zoom * 100) + '%';
+}
+
+// ---- Coordinate conversion ----
+function screenToImagePx(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = (clientX - rect.left) * (canvas.width / rect.width);
+  const cy = (clientY - rect.top) * (canvas.height / rect.height);
+  const s = baseZoom * zoom;
+  return [(cx - panX) / s, (cy - panY) / s];
+}
+
+// ---- Slice cache ----
+function clearSliceCache() {
+  sliceCache.clear();
+}
+
+function preloadSlices(centerIdx) {
+  if (!currentScan || !volumeInfo) return;
+  for (let i = -PRELOAD_RANGE; i <= PRELOAD_RANGE; i++) {
+    const idx = centerIdx + i;
+    if (idx < 0 || idx >= volumeInfo.num_slices) continue;
+    if (sliceCache.has(idx)) continue;
+    const img = new Image();
+    img.src = '/api/scans/' + currentScan.series_uid + '/slice/' + idx;
+    sliceCache.set(idx, img);
+  }
+  // Evict distant entries
+  if (sliceCache.size > MAX_CACHE_SIZE) {
+    const keys = [...sliceCache.keys()];
+    keys.sort((a, b) => Math.abs(b - centerIdx) - Math.abs(a - centerIdx));
+    while (sliceCache.size > MAX_CACHE_SIZE) {
+      sliceCache.delete(keys.shift());
+    }
+  }
+}
 
 // ---- API helpers ----
 async function api(method, path, body) {
@@ -518,6 +628,7 @@ async function selectScan(uid) {
   volumeInfo = await api('GET', '/api/scans/' + uid + '/info');
   annotations = currentScan.annotations || [];
 
+  clearSliceCache();
   slider.max = volumeInfo.num_slices - 1;
   slider.value = Math.floor(volumeInfo.num_slices / 2);
   currentSlice = parseInt(slider.value);
@@ -526,131 +637,198 @@ async function selectScan(uid) {
   document.getElementById('report-btn').style.display = 'block';
   document.getElementById('report-box').style.display = 'none';
   document.getElementById('copy-btn').style.display = 'none';
-  await loadSlice(currentSlice);
+  await loadSlice(currentSlice, true);
   renderAnnotations();
   loadScans();
-  setStatus('Scan loaded: ' + (currentScan.label || uid.slice(-12)) + ' | Scroll or drag slider to navigate | Click to annotate');
+  setStatus('Scan loaded: ' + (currentScan.label || uid.slice(-12)) + ' | Scroll=slices | Ctrl+Scroll=zoom | Right-drag=pan | Click=annotate');
 }
 
-async function loadSlice(idx) {
+async function loadSlice(idx, fitFirst) {
   if (!currentScan) return;
   currentSlice = parseInt(idx);
   slider.value = currentSlice;
   sliceInfo.textContent = (currentSlice + 1) + ' / ' + volumeInfo.num_slices;
 
+  // Try cache first for instant rendering
+  const cached = sliceCache.get(currentSlice);
+  if (cached && cached.complete && cached.naturalWidth > 0) {
+    sliceImage = cached;
+    if (fitFirst) { resizeCanvas(); }
+    drawFrame();
+    updateZoomDisplay();
+    preloadSlices(currentSlice);
+    return;
+  }
+
   const img = new Image();
   img.onload = () => {
-    canvas.width = img.width;
-    canvas.height = img.height;
     sliceImage = img;
+    sliceCache.set(currentSlice, img);
+    if (fitFirst) { resizeCanvas(); }
     drawFrame();
+    updateZoomDisplay();
+    preloadSlices(currentSlice);
   };
-  img.src = '/api/scans/' + currentScan.series_uid + '/slice/' + currentSlice + '?t=' + Date.now();
+  img.src = '/api/scans/' + currentScan.series_uid + '/slice/' + currentSlice;
 }
 
 // ---- Drawing ----
 function drawFrame() {
   if (!sliceImage) return;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.translate(panX, panY);
+  const s = baseZoom * zoom;
+  ctx.scale(s, s);
+  ctx.imageSmoothingEnabled = zoom <= 1;
+
   ctx.drawImage(sliceImage, 0, 0);
 
-  // Draw annotations on this slice
-  if (!volumeInfo) return;
-  const spacing = volumeInfo.spacing; // (x, y, z) from SimpleITK
-  const origin = volumeInfo.origin;
+  // Draw annotations (in image pixel space)
+  if (volumeInfo) {
+    const spacing = volumeInfo.spacing;
+    const origin = volumeInfo.origin;
 
-  for (let i = 0; i < annotations.length; i++) {
-    const a = annotations[i];
-    // Which slice does this annotation fall on?
-    // slice index = (coordZ - origin[2]) / spacing[2]   (SimpleITK z)
-    const annSlice = Math.round((a.coordZ - origin[2]) / spacing[2]);
-    const sliceDist = Math.abs(annSlice - currentSlice);
+    for (let i = 0; i < annotations.length; i++) {
+      const a = annotations[i];
+      const annSlice = Math.round((a.coordZ - origin[2]) / spacing[2]);
+      const sliceDist = Math.abs(annSlice - currentSlice);
+      if (sliceDist > 3) continue;
 
-    if (sliceDist > 3) continue; // too far, don't show
+      const px = (a.coordX - origin[0]) / spacing[0];
+      const py = (a.coordY - origin[1]) / spacing[1];
+      const radiusPx = (a.diameter_mm / 2) / spacing[0];
 
-    // Pixel position on the image
-    // numpy array is (z, y, x) but image pixels are (col=x, row=y)
-    // pixel_col = (coordX - origin[0]) / spacing[0]
-    // pixel_row = (coordY - origin[1]) / spacing[1]
-    const px = (a.coordX - origin[0]) / spacing[0];
-    const py = (a.coordY - origin[1]) / spacing[1];
-    const radiusPx = (a.diameter_mm / 2) / spacing[0];
+      const alpha = sliceDist === 0 ? 1.0 : 0.3;
+      ctx.strokeStyle = 'rgba(0, 255, 100, ' + alpha + ')';
+      // Keep line width constant on screen regardless of zoom
+      ctx.lineWidth = (sliceDist === 0 ? 2 : 1) / s;
 
-    const alpha = sliceDist === 0 ? 1.0 : 0.3;
-    ctx.strokeStyle = 'rgba(0, 255, 100, ' + alpha + ')';
-    ctx.lineWidth = sliceDist === 0 ? 2 : 1;
+      // Circle
+      ctx.beginPath();
+      ctx.arc(px, py, Math.max(radiusPx, 4) + 3, 0, Math.PI * 2);
+      ctx.stroke();
 
-    // Circle
-    ctx.beginPath();
-    ctx.arc(px, py, Math.max(radiusPx, 4) + 3, 0, Math.PI * 2);
-    ctx.stroke();
+      // Crosshair
+      const r = Math.max(radiusPx, 4) + 6;
+      ctx.beginPath();
+      ctx.moveTo(px - r - 4, py); ctx.lineTo(px - r + 2 - 8, py);
+      ctx.moveTo(px + r + 4, py); ctx.lineTo(px + r - 2 + 8, py);
+      ctx.moveTo(px, py - r - 4); ctx.lineTo(px, py - r + 2 - 8);
+      ctx.moveTo(px, py + r + 4); ctx.lineTo(px, py + r - 2 + 8);
+      ctx.stroke();
 
-    // Crosshair
-    const r = Math.max(radiusPx, 4) + 6;
-    ctx.beginPath();
-    ctx.moveTo(px - r - 4, py); ctx.lineTo(px - r + 2 - 8, py);
-    ctx.moveTo(px + r + 4, py); ctx.lineTo(px + r - 2 + 8, py);
-    ctx.moveTo(px, py - r - 4); ctx.lineTo(px, py - r + 2 - 8);
-    ctx.moveTo(px, py + r + 4); ctx.lineTo(px, py + r - 2 + 8);
-    ctx.stroke();
-
-    // Label
-    if (sliceDist === 0) {
-      ctx.font = '12px monospace';
-      ctx.fillStyle = 'rgba(0, 255, 100, 0.9)';
-      ctx.fillText(a.diameter_mm.toFixed(0) + 'mm', px + r + 6, py + 4);
+      // Label (keep font size constant on screen)
+      if (sliceDist === 0) {
+        ctx.font = Math.round(12 / s) + 'px monospace';
+        ctx.fillStyle = 'rgba(0, 255, 100, 0.9)';
+        ctx.fillText(a.diameter_mm.toFixed(0) + 'mm', px + r + 6, py + 4);
+      }
     }
   }
+
+  ctx.restore();
 }
 
 // ---- Interaction ----
+
+// Left-click to annotate
 canvas.addEventListener('click', (e) => {
   if (!currentScan || !volumeInfo) return;
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const px = (e.clientX - rect.left) * scaleX;
-  const py = (e.clientY - rect.top) * scaleY;
+  // Ignore if we just finished panning
+  if (wasPanning) { wasPanning = false; return; }
 
+  const [imgPx, imgPy] = screenToImagePx(e.clientX, e.clientY);
   const spacing = volumeInfo.spacing;
   const origin = volumeInfo.origin;
 
-  const worldX = origin[0] + px * spacing[0];
-  const worldY = origin[1] + py * spacing[1];
+  const worldX = origin[0] + imgPx * spacing[0];
+  const worldY = origin[1] + imgPy * spacing[1];
   const worldZ = origin[2] + currentSlice * spacing[2];
   const diameter = parseFloat(document.getElementById('diameter-input').value) || 6;
 
   addAnnotation(worldX, worldY, worldZ, diameter);
 });
 
+// Tooltip on mousemove
 canvas.addEventListener('mousemove', (e) => {
   if (!volumeInfo) { tooltip.style.display = 'none'; return; }
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
-  const px = (e.clientX - rect.left) * scaleX;
-  const py = (e.clientY - rect.top) * scaleY;
 
+  // Update pan if dragging
+  if (isPanning) {
+    panX = panOriginX + (e.clientX - panDragStartX);
+    panY = panOriginY + (e.clientY - panDragStartY);
+    drawFrame();
+  }
+
+  const [imgPx, imgPy] = screenToImagePx(e.clientX, e.clientY);
   const spacing = volumeInfo.spacing;
   const origin = volumeInfo.origin;
-  const wx = (origin[0] + px * spacing[0]).toFixed(1);
-  const wy = (origin[1] + py * spacing[1]).toFixed(1);
+  const wx = (origin[0] + imgPx * spacing[0]).toFixed(1);
+  const wy = (origin[1] + imgPy * spacing[1]).toFixed(1);
   const wz = (origin[2] + currentSlice * spacing[2]).toFixed(1);
 
   tooltip.style.display = 'block';
-  tooltip.style.left = (e.clientX - canvas.parentElement.getBoundingClientRect().left + 12) + 'px';
-  tooltip.style.top = (e.clientY - canvas.parentElement.getBoundingClientRect().top - 24) + 'px';
+  const wrapRect = canvasWrap.getBoundingClientRect();
+  tooltip.style.left = (e.clientX - wrapRect.left + 12) + 'px';
+  tooltip.style.top = (e.clientY - wrapRect.top - 24) + 'px';
   tooltip.textContent = 'x:' + wx + '  y:' + wy + '  z:' + wz + ' mm';
 });
 
 canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
-// Scroll wheel to navigate slices
-document.getElementById('canvas-wrap').addEventListener('wheel', (e) => {
+// Prevent context menu on canvas for right-click pan
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+// Pan: right-click drag or middle-click drag
+let wasPanning = false;
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button === 1 || e.button === 2) {
+    e.preventDefault();
+    isPanning = true;
+    panDragStartX = e.clientX;
+    panDragStartY = e.clientY;
+    panOriginX = panX;
+    panOriginY = panY;
+    canvas.style.cursor = 'grabbing';
+  }
+});
+
+document.addEventListener('mouseup', (e) => {
+  if (isPanning) {
+    isPanning = false;
+    wasPanning = true;
+    canvas.style.cursor = 'crosshair';
+    // Reset wasPanning after a tick so click handler can check it
+    setTimeout(() => { wasPanning = false; }, 0);
+  }
+});
+
+// Double-click to reset zoom
+canvas.addEventListener('dblclick', (e) => {
+  e.preventDefault();
+  resetZoom();
+});
+
+// Scroll wheel: normal=slices, Ctrl/Meta=zoom
+canvasWrap.addEventListener('wheel', (e) => {
   e.preventDefault();
   if (!volumeInfo) return;
-  const newSlice = Math.max(0, Math.min(volumeInfo.num_slices - 1,
-    currentSlice + (e.deltaY > 0 ? 1 : -1)));
-  if (newSlice !== currentSlice) loadSlice(newSlice);
+
+  if (e.ctrlKey || e.metaKey) {
+    // Zoom centered on mouse
+    const rect = canvas.getBoundingClientRect();
+    const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const cy = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const factor = e.deltaY < 0 ? 1.12 : 0.89;
+    applyZoomAt(cx, cy, factor);
+  } else {
+    // Scroll through slices
+    const delta = e.deltaY > 0 ? 1 : -1;
+    const newSlice = Math.max(0, Math.min(volumeInfo.num_slices - 1, currentSlice + delta));
+    if (newSlice !== currentSlice) loadSlice(newSlice);
+  }
 }, { passive: false });
 
 // ---- Annotations ----
@@ -689,7 +867,6 @@ function renderAnnotations() {
       '<div class="ann-coords">(' + a.coordX.toFixed(1) + ', ' + a.coordY.toFixed(1) + ', ' + a.coordZ.toFixed(1) + ') mm</div>' +
       '<div class="ann-size">' + a.diameter_mm.toFixed(1) + ' mm diameter</div>' +
       (a.note ? '<div style="color:#888;font-size:11px;margin-top:2px;">' + a.note + '</div>' : '');
-    // Click annotation to jump to that slice
     div.addEventListener('click', (e) => {
       if (e.target.classList.contains('delete-btn')) return;
       if (!volumeInfo) return;
@@ -760,7 +937,6 @@ async function copyReport() {
     setTimeout(() => { btn.textContent = 'Copy to Clipboard'; btn.classList.remove('copied-flash'); }, 2000);
     setStatus('Report copied to clipboard. Paste into your dictation software.');
   } catch (e) {
-    // Fallback for non-HTTPS contexts
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -774,9 +950,10 @@ async function copyReport() {
 }
 
 function changeWindow() {
-  // Window change requires re-fetching slices with different params
-  // For now we just reload current slice (server uses fixed lung window)
-  if (currentScan) loadSlice(currentSlice);
+  if (currentScan) {
+    clearSliceCache();
+    loadSlice(currentSlice);
+  }
 }
 
 function setStatus(msg) {
@@ -784,6 +961,7 @@ function setStatus(msg) {
 }
 
 // ---- Init ----
+resizeCanvas();
 loadScans();
 </script>
 </body>
