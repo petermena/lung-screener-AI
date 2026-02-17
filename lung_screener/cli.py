@@ -67,9 +67,23 @@ def main(ctx, config, verbose):
 @click.option("--lr", type=float, help="Override learning rate")
 @click.option("--resume", type=click.Path(exists=True), help="Resume from checkpoint")
 @click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory")
+@click.option(
+    "--dataset",
+    multiple=True,
+    type=(click.Choice(["luna16", "luna25"]), click.Path(exists=True)),
+    help="Add a dataset: --dataset luna25 ./data/luna25 (repeatable)",
+)
 @click.pass_context
-def train(ctx, epochs, batch_size, lr, resume, checkpoint_dir):
-    """Train the nodule detection model on LUNA16 data."""
+def train(ctx, epochs, batch_size, lr, resume, checkpoint_dir, dataset):
+    """Train the nodule detection model.
+
+    By default trains on LUNA16 data.  To include additional datasets
+    (e.g. LUNA25) pass one or more --dataset flags:
+
+    \b
+        lung-screener train --dataset luna25 ./data/luna25
+        lung-screener train --dataset luna16 ./data/luna16 --dataset luna25 ./data/luna25
+    """
     from .train import Trainer
 
     config = ctx.obj["config"]
@@ -81,6 +95,12 @@ def train(ctx, epochs, batch_size, lr, resume, checkpoint_dir):
         config.setdefault("training", {})["batch_size"] = batch_size
     if lr:
         config.setdefault("training", {})["learning_rate"] = lr
+
+    # Build data.datasets list from --dataset flags (overrides YAML)
+    if dataset:
+        config.setdefault("data", {})["datasets"] = [
+            {"type": kind, "dataset_dir": path} for kind, path in dataset
+        ]
 
     trainer = Trainer(config, checkpoint_dir=checkpoint_dir)
     trainer.train(resume_from=resume)

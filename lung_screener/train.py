@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .dataset import LUNA16Dataset
+from .dataset import CombinedLungDataset, LUNA16Dataset
 from .metrics_dashboard import MetricsLogger, save_dashboard
 from .model import build_model
 
@@ -87,29 +87,20 @@ class Trainer:
         self.epochs_without_improvement = 0
 
     def create_dataloaders(self) -> tuple[DataLoader, DataLoader]:
-        """Create training and validation data loaders."""
+        """Create training and validation data loaders.
+
+        When ``data.datasets`` is configured the trainer combines all
+        listed datasets (e.g. LUNA16 + LUNA25) via
+        :class:`CombinedLungDataset`.  Otherwise falls back to a single
+        LUNA16 dataset for backwards compatibility.
+        """
         train_config = self.config.get("training", {})
-        data_config = self.config.get("data", {})
-        dataset_dir = data_config.get("dataset_dir", "./data/luna16")
-        cache_dir = data_config.get("cache_dir", "./data/cache")
-        val_split = data_config.get("val_split", 0.2)
 
-        train_dataset = LUNA16Dataset(
-            dataset_dir=dataset_dir,
-            config=self.config,
-            split="train",
-            val_split=val_split,
-            augment=True,
-            cache_dir=cache_dir,
+        train_dataset = CombinedLungDataset.from_config(
+            self.config, split="train", augment=True,
         )
-
-        val_dataset = LUNA16Dataset(
-            dataset_dir=dataset_dir,
-            config=self.config,
-            split="val",
-            val_split=val_split,
-            augment=False,
-            cache_dir=cache_dir,
+        val_dataset = CombinedLungDataset.from_config(
+            self.config, split="val", augment=False,
         )
 
         logger.info(f"Training samples: {len(train_dataset)}")

@@ -90,6 +90,7 @@ pacs:
 
 data:
   # Path to LUNA16 / LIDC-IDRI dataset (or prepared training data)
+  # Used when data.datasets is not set (legacy single-dataset mode).
   dataset_dir: "./data/luna16"
   # Preprocessed data cache
   cache_dir: "./data/cache"
@@ -100,6 +101,26 @@ data:
   max_val_candidates: 5000
   # Directory for manually imported DICOM scans & annotations
   training_dir: "./data/training"
+
+  # Multi-dataset training — uncomment "datasets" to train on several
+  # data sources at once.  When present this overrides "dataset_dir".
+  #
+  # Each entry needs:
+  #   type        : "luna16" or "luna25"
+  #   dataset_dir : root path for that dataset
+  #   enabled     : true/false (optional, default true)
+  #   cache_dir   : per-dataset cache override (optional)
+  #   val_split   : per-dataset val split override (optional)
+  #
+  # LUNA25 supports two layouts:
+  #   - Nodule blocks: dataset_dir/image/*.npy + annotations.csv
+  #   - Full volumes:  dataset_dir/images/*.mha + annotations.csv
+  #
+  # datasets:
+  #   - type: luna16
+  #     dataset_dir: "./data/luna16"
+  #   - type: luna25
+  #     dataset_dir: "./data/luna25"
 
 # False positive reduction (second-stage classifier)
 fp_reduction:

@@ -46,13 +46,25 @@ def load_dicom_series(dicom_dir: str | Path) -> sitk.Image:
 def load_mhd(mhd_path: str | Path) -> sitk.Image:
     """Load a .mhd/.raw volume (LUNA16 format).
 
+    Also works for .mha (MetaImage) files used by LUNA25, since
+    SimpleITK's ``ReadImage`` handles both transparently.
+
     Args:
-        mhd_path: Path to .mhd header file.
+        mhd_path: Path to .mhd or .mha file.
 
     Returns:
         SimpleITK image.
     """
     return sitk.ReadImage(str(mhd_path))
+
+
+def load_mha(mha_path: str | Path) -> sitk.Image:
+    """Load a .mha volume (LUNA25 MetaImage format).
+
+    This is an alias for :func:`load_mhd` — SimpleITK reads both
+    .mhd/.raw pairs and single-file .mha images with the same call.
+    """
+    return sitk.ReadImage(str(mha_path))
 
 
 def resample_volume(
