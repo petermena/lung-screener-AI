@@ -334,6 +334,12 @@ _LUNG_RADS_RECOMMENDATIONS = {
         "Findings very suspicious for pulmonary malignancy. "
         "Recommend tissue sampling and/or PET/CT. Consider multidisciplinary consultation.",
     ),
+    "4X": (
+        "Suspicious with Additional Features",
+        "Category 3 or 4 finding with additional features suspicious for malignancy "
+        "(e.g., spiculation, interval growth). "
+        "Recommend tissue sampling and/or PET/CT. Consider multidisciplinary consultation.",
+    ),
 }
 
 

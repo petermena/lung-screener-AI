@@ -150,4 +150,15 @@ The system assigns [ACR Lung-RADS v2022](https://www.acr.org/Clinical-Resources/
 | 2 | <30mm | Continue annual screening with LDCT in 12 months |
 | 3 | ≥30mm | Short-term follow-up — LDCT in 6 months |
 
+### Category 4X — Additional Suspicious Features
+
+The **4X** modifier is applied to any Category 3 or 4 nodule when additional features increase suspicion of malignancy:
+
+| Trigger | Description |
+|---------|-------------|
+| Spiculation | Nodule has spiculated (irregular/star-shaped) margins |
+| Interval growth | Nodule is growing or shows slow growth on prior comparison |
+
+When 4X is assigned the recommendation is: **tissue sampling and/or PET/CT with multidisciplinary consultation**, regardless of the baseline size category.
+
 > **Risk-based upgrade:** When a Brock/PanCan malignancy probability ≥15% is computed, a Category 3 nodule is automatically upgraded to 4A regardless of type.

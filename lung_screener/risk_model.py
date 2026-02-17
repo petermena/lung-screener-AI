@@ -204,6 +204,8 @@ def compute_lung_rads_with_risk(
     nodule_diameter_mm: float,
     nodule_type: str = "solid",
     risk_score: RiskScore | None = None,
+    spiculation: bool = False,
+    growth_assessment: str = "",
 ) -> str:
     """Compute Lung-RADS category accounting for nodule type.
 
@@ -212,13 +214,19 @@ def compute_lung_rads_with_risk(
     - Part-solid: 2 (<6mm total), 3 (>=6mm, solid <6mm), 4A (solid 6-8mm), 4B (solid >=8mm)
     - Ground-glass: 2 (<30mm), 3 (>=30mm)
 
+    Category 4X modifier is applied to any Category 3 or 4 nodule when
+    additional suspicious features are present (spiculation, growing nodule).
+
     Args:
         nodule_diameter_mm: Nodule diameter in mm.
         nodule_type: "solid", "part_solid", or "ground_glass".
         risk_score: Optional risk score for upgrade consideration.
+        spiculation: Whether the nodule has spiculated margins.
+        growth_assessment: Growth status from prior comparison
+            ("growing", "slow_growth", "new", "stable", "shrinking", or "").
 
     Returns:
-        Lung-RADS category string.
+        Lung-RADS category string (e.g. "3", "4A", "4X").
     """
     d = nodule_diameter_mm
 
@@ -258,6 +266,22 @@ def compute_lung_rads_with_risk(
                 f"Lung-RADS upgraded from 3 to 4A based on Brock probability "
                 f"({risk_score.malignancy_probability:.1%})"
             )
+
+    # 4X modifier: applied to Category 3 or 4 when additional suspicious
+    # features are present (ACR Lung-RADS v2022 §4X)
+    if category in ("3", "4A", "4B"):
+        has_suspicious_features = spiculation or growth_assessment in ("growing", "slow_growth")
+        if has_suspicious_features:
+            reasons = []
+            if spiculation:
+                reasons.append("spiculation")
+            if growth_assessment in ("growing", "slow_growth"):
+                reasons.append(f"interval growth ({growth_assessment})")
+            logger.info(
+                f"Lung-RADS upgraded to 4X from {category} due to: "
+                f"{', '.join(reasons)}"
+            )
+            category = "4X"
 
     return category
 
