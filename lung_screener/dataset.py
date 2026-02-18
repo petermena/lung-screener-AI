@@ -210,8 +210,8 @@ class LUNA16Dataset(Dataset):
             except OSError:
                 tmp_path.unlink(missing_ok=True)
 
-        # Keep in memory cache (limit to ~10 volumes to avoid OOM)
-        if len(self._volume_cache) < 10:
+        # Keep in memory cache (limit to ~50 volumes; ~300MB each ≈ 15GB max)
+        if len(self._volume_cache) < 50:
             self._volume_cache[seriesuid] = volume
 
         return volume
@@ -612,7 +612,7 @@ class LUNA25Dataset(Dataset):
             except OSError:
                 tmp_path.unlink(missing_ok=True)
 
-        if len(self._volume_cache) < 10:
+        if len(self._volume_cache) < 50:
             self._volume_cache[seriesuid] = volume
 
         return volume

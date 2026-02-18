@@ -38,9 +38,9 @@ training:
   learning_rate: 0.001
   weight_decay: 0.0001
   epochs: 100
-  # DataLoader workers — 4 is optimal for typical 8-core RunPod pods.
+  # DataLoader workers — scale with vCPU count (aim for ~0.5-0.75x vCPUs).
   # Set to 0 for debugging (runs in main process).
-  num_workers: 4
+  num_workers: 8
   # Positive/negative ratio for sampling
   pos_neg_ratio: 1.0
   # Data augmentation

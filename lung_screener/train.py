@@ -117,6 +117,7 @@ class Trainer:
             pin_memory=pin_memory,
             drop_last=True,
             persistent_workers=num_workers > 0,
+            prefetch_factor=3 if num_workers > 0 else None,
         )
 
         val_loader = DataLoader(
@@ -126,6 +127,7 @@ class Trainer:
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=num_workers > 0,
+            prefetch_factor=3 if num_workers > 0 else None,
         )
 
         return train_loader, val_loader
