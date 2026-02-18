@@ -19,7 +19,7 @@
 # survives pod stop/restart. The script auto-detects RunPod and uses
 # /workspace/luna25 as the data directory, with a symlink at ./data/luna25.
 
-set -euo pipefail
+set -uo pipefail
 
 # ---------- configuration ----------
 ZENODO_IMAGES="https://zenodo.org/api/records/14223624/files"
@@ -94,18 +94,12 @@ download_file() {
                 -C - \
                 --retry 3 --retry-delay 5 --retry-max-time 120 \
                 --connect-timeout 30 \
+                --fail \
                 -o "$output" "$url"; then
             local file_size
             file_size=$(stat -c%s "$output" 2>/dev/null || echo "0")
             echo "  Downloaded $(basename "$output"): ${file_size} bytes"
-
-            # Zenodo error pages are small HTML files
-            if [ "$file_size" -lt 1000 ]; then
-                echo "  File too small (${file_size} bytes) — likely an error page, retrying..."
-                rm -f "$output"
-            else
-                return 0
-            fi
+            return 0
         else
             echo "  curl failed (exit code $?)"
         fi
@@ -126,17 +120,33 @@ download_file() {
 if [ "$DOWNLOAD_ANNOTATIONS" = true ]; then
     echo ""
     echo "=== Downloading annotation metadata (record 14673658) ==="
-    # List annotation files via API; fall back to known files if jq unavailable
-    if command -v jq &>/dev/null; then
-        ANNOT_FILES=$(curl -sL "$ZENODO_ANNOTATIONS" | jq -r '.entries[].key' 2>/dev/null || true)
+    # Discover actual filenames from the Zenodo API
+    ANNOT_FILES=""
+    ANNOT_JSON=$(curl -sL "https://zenodo.org/api/records/14673658" 2>/dev/null || true)
+    if [ -n "$ANNOT_JSON" ]; then
+        if command -v jq &>/dev/null; then
+            ANNOT_FILES=$(echo "$ANNOT_JSON" | jq -r '.files[]?.key // empty' 2>/dev/null || true)
+        elif command -v python3 &>/dev/null; then
+            ANNOT_FILES=$(echo "$ANNOT_JSON" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for f in data.get('files', []):
+        print(f['key'])
+except: pass
+" 2>/dev/null || true)
+        fi
     fi
-    if [ -z "${ANNOT_FILES:-}" ]; then
-        # Known annotation files from the LUNA25 challenge
-        ANNOT_FILES="luna25_annotations.csv"
+    if [ -z "$ANNOT_FILES" ]; then
+        echo "  WARNING: Could not discover annotation files from Zenodo API."
+        echo "  Skipping annotations. Download them manually from:"
+        echo "    https://zenodo.org/records/14673658"
+    else
+        echo "  Found annotation files: $ANNOT_FILES"
+        for fname in $ANNOT_FILES; do
+            download_file "${ZENODO_ANNOTATIONS}/${fname}/content" "$DATA_DIR/$fname" || true
+        done
     fi
-    for fname in $ANNOT_FILES; do
-        download_file "${ZENODO_ANNOTATIONS}/${fname}/content" "$DATA_DIR/$fname"
-    done
 fi
 
 # ---------- download nodule blocks ----------
