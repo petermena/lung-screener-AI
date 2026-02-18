@@ -196,7 +196,7 @@ class LUNA16Dataset(Dataset):
             return None
 
         image = load_mhd(mhd_path)
-        result = self.preprocessor.process_scan(image)
+        result = self.preprocessor.process_scan(image, training_mode=True)
         volume = result["volume"]
 
         # Save to disk cache (atomic write to avoid corruption from parallel workers)
@@ -599,7 +599,7 @@ class LUNA25Dataset(Dataset):
 
         # SimpleITK reads both .mha and .mhd transparently
         image = load_mhd(vol_path)
-        result = self.preprocessor.process_scan(image)
+        result = self.preprocessor.process_scan(image, training_mode=True)
         volume = result["volume"]
 
         if self.cache_dir:

@@ -298,18 +298,22 @@ class CTPreprocessor:
         self.min_size_mm = cand_config.get("min_size_mm", 3.0)
         self.max_size_mm = cand_config.get("max_size_mm", 30.0)
 
-    def process_scan(self, image: sitk.Image) -> dict:
+    def process_scan(self, image: sitk.Image, training_mode: bool = False) -> dict:
         """Process a single CT scan through the full pipeline.
 
         Args:
             image: SimpleITK image of the CT scan.
+            training_mode: If True, skip lung segmentation and candidate
+                extraction (not needed when candidate coordinates are already
+                known from annotation files).  This dramatically reduces CPU
+                time during dataset cache warm-up.
 
         Returns:
             Dict with keys:
                 - volume: preprocessed normalized volume
                 - volume_hu: raw Hounsfield Unit volume (for calcification analysis)
-                - lung_mask: binary lung segmentation
-                - candidates: list of candidate dicts
+                - lung_mask: binary lung segmentation (None in training_mode)
+                - candidates: list of candidate dicts (empty in training_mode)
                 - spacing: final voxel spacing
                 - origin: world origin
         """
@@ -321,17 +325,23 @@ class CTPreprocessor:
         # Convert to numpy (HU values)
         volume_hu = sitk.GetArrayFromImage(resampled).astype(np.float32)
 
-        # Segment lungs before HU windowing
-        lung_mask = segment_lungs(volume_hu, self.lung_threshold)
-
         # Apply HU window and normalize
         volume = apply_hu_window(volume_hu, self.hu_min, self.hu_max, self.normalize)
 
-        # Extract candidates
-        candidates = extract_candidates(
-            volume, lung_mask, spacing,
-            self.min_size_mm, self.max_size_mm,
-        )
+        if training_mode:
+            # Skip expensive segmentation & candidate extraction — training
+            # already has candidate coordinates from the annotation CSV.
+            lung_mask = None
+            candidates = []
+        else:
+            # Segment lungs before HU windowing
+            lung_mask = segment_lungs(volume_hu, self.lung_threshold)
+
+            # Extract candidates (only needed for inference)
+            candidates = extract_candidates(
+                volume, lung_mask, spacing,
+                self.min_size_mm, self.max_size_mm,
+            )
 
         return {
             "volume": volume,
