@@ -6,6 +6,7 @@ Handles loading annotations, creating train/val splits, and providing
 
 import logging
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,45 @@ from tqdm import tqdm
 from .preprocessing import CTPreprocessor, apply_hu_window, extract_patch, load_mhd
 
 logger = logging.getLogger(__name__)
+
+
+# -- Module-level helpers for multiprocessing (must be picklable) -----------
+
+
+def _cache_luna16_volume(args: tuple) -> str | None:
+    """Load, preprocess, and cache a single LUNA16 volume to disk.
+
+    Designed to run in a :class:`ProcessPoolExecutor` worker.  Returns the
+    *seriesuid* on success or ``None`` on failure.
+    """
+    seriesuid, dataset_dir, cache_dir, config = args
+    cache_path = Path(cache_dir) / f"{seriesuid}.npy"
+    if cache_path.exists():
+        return seriesuid  # already cached
+
+    # Find the .mhd file across subset directories
+    mhd_path = None
+    for subset_dir in sorted(Path(dataset_dir).glob("subset*")):
+        candidate = subset_dir / f"{seriesuid}.mhd"
+        if candidate.exists():
+            mhd_path = candidate
+            break
+    if mhd_path is None:
+        return None
+
+    try:
+        preprocessor = CTPreprocessor(config)
+        image = load_mhd(mhd_path)
+        result = preprocessor.process_scan(image, training_mode=True)
+        volume = result["volume"]
+
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        tmp_path = Path(cache_dir) / f"{seriesuid}.tmp.{os.getpid()}.npy"
+        np.save(tmp_path, volume.astype(np.float16))
+        os.replace(tmp_path, cache_path)
+        return seriesuid
+    except Exception:
+        return None
 
 
 class LUNA16Dataset(Dataset):
@@ -222,8 +262,10 @@ class LUNA16Dataset(Dataset):
     def _warm_cache(self):
         """Pre-populate the disk cache for all unique volumes.
 
-        Runs in the main process before DataLoader workers are spawned so
-        that workers find fast .npy files instead of raw .mhd volumes.
+        Uses multiprocessing to load/preprocess volumes in parallel across
+        all available CPU cores.  Runs in the main process before DataLoader
+        workers are spawned so that workers find fast ``.npy`` files on disk
+        instead of raw ``.mhd`` volumes (~30-60s each).
         """
         if not self.cache_dir:
             logger.warning(
@@ -243,14 +285,26 @@ class LUNA16Dataset(Dataset):
             )
             return
 
+        n_workers = min(os.cpu_count() or 1, len(uncached))
         logger.info(
-            "LUNA16: Pre-caching %d/%d volumes to %s (one-time cost)...",
+            "LUNA16: Pre-caching %d/%d volumes to %s using %d workers "
+            "(one-time cost)...",
             len(uncached),
             len(unique_series),
             self.cache_dir,
+            n_workers,
         )
-        for seriesuid in tqdm(uncached, desc="Caching LUNA16 volumes"):
-            self._load_volume(seriesuid)
+
+        args = [
+            (sid, str(self.dataset_dir), str(self.cache_dir), self.config)
+            for sid in uncached
+        ]
+
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_cache_luna16_volume, a): a[0] for a in args}
+            with tqdm(total=len(uncached), desc="Caching LUNA16 volumes") as pbar:
+                for future in as_completed(futures):
+                    pbar.update(1)
 
         # Free RAM before DataLoader workers fork
         self._volume_cache.clear()
