@@ -202,7 +202,8 @@ class LUNA16Dataset(Dataset):
         # Save to disk cache (atomic write to avoid corruption from parallel workers)
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.cache_dir / f"{seriesuid}.npy.tmp.{os.getpid()}"
+            # np.save() auto-appends .npy, so use a suffix that already ends in .npy
+            tmp_path = self.cache_dir / f"{seriesuid}.tmp.{os.getpid()}.npy"
             cache_path = self.cache_dir / f"{seriesuid}.npy"
             np.save(tmp_path, volume.astype(np.float16))
             try:
@@ -683,7 +684,8 @@ class LUNA25Dataset(Dataset):
 
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.cache_dir / f"luna25_{seriesuid}.npy.tmp.{os.getpid()}"
+            # np.save() auto-appends .npy, so use a suffix that already ends in .npy
+            tmp_path = self.cache_dir / f"luna25_{seriesuid}.tmp.{os.getpid()}.npy"
             cache_path = self.cache_dir / f"luna25_{seriesuid}.npy"
             np.save(tmp_path, volume.astype(np.float16))
             try:
