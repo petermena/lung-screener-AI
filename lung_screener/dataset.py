@@ -492,11 +492,26 @@ class LUNA25Dataset(Dataset):
 
         return samples
 
+    @staticmethod
+    def _col(df: pd.DataFrame, *candidates: str) -> str:
+        """Return the first column name that exists in *df* (case-insensitive)."""
+        lower_map = {c.lower(): c for c in df.columns}
+        for name in candidates:
+            if name in df.columns:
+                return name
+            if name.lower() in lower_map:
+                return lower_map[name.lower()]
+        raise KeyError(f"None of {candidates} found in columns {list(df.columns)}")
+
     def _samples_from_blocks(self, df: pd.DataFrame) -> list[dict]:
         """Build samples list from pre-extracted nodule blocks."""
-        # Expected columns: AnnotationID, label
-        id_col = "AnnotationID" if "AnnotationID" in df.columns else "annotation_id"
-        label_col = "label" if "label" in df.columns else "class"
+        id_col = self._col(df, "AnnotationID", "annotation_id")
+        label_col = self._col(df, "label", "class")
+        series_col = self._col(df, "seriesuid", "SeriesInstanceUID") if any(
+            c.lower() in ("seriesuid", "seriesinstanceuid") for c in df.columns
+        ) else None
+        has_diameter = any(c.lower() == "diameter_mm" for c in df.columns)
+        diam_col = self._col(df, "diameter_mm") if has_diameter else None
 
         samples = []
         for _, row in df.iterrows():
@@ -506,25 +521,35 @@ class LUNA25Dataset(Dataset):
                 continue
             samples.append({
                 "annotation_id": ann_id,
-                "seriesuid": str(row.get("seriesuid", ann_id)),
+                "seriesuid": str(row[series_col]) if series_col else ann_id,
                 "label": int(row[label_col]),
-                "diameter_mm": float(row["diameter_mm"]) if "diameter_mm" in df.columns else 0.0,
+                "diameter_mm": float(row[diam_col]) if diam_col else 0.0,
             })
         return samples
 
     def _samples_from_volumes(self, df: pd.DataFrame) -> list[dict]:
         """Build samples list from full-volume annotation CSV."""
-        label_col = "label" if "label" in df.columns else "class"
+        label_col = self._col(df, "label", "class")
+        series_col = self._col(df, "seriesuid", "SeriesInstanceUID")
+        coord_x_col = self._col(df, "coordX", "CoordX")
+        coord_y_col = self._col(df, "coordY", "CoordY")
+        coord_z_col = self._col(df, "coordZ", "CoordZ")
+        id_col = self._col(df, "AnnotationID", "annotation_id") if any(
+            c.lower() in ("annotationid", "annotation_id") for c in df.columns
+        ) else None
+        has_diameter = any(c.lower() == "diameter_mm" for c in df.columns)
+        diam_col = self._col(df, "diameter_mm") if has_diameter else None
+
         samples = []
         for _, row in df.iterrows():
             samples.append({
-                "annotation_id": str(row.get("AnnotationID", "")),
-                "seriesuid": str(row["seriesuid"]),
-                "coord_x": float(row["coordX"]),
-                "coord_y": float(row["coordY"]),
-                "coord_z": float(row["coordZ"]),
+                "annotation_id": str(row[id_col]) if id_col else "",
+                "seriesuid": str(row[series_col]),
+                "coord_x": float(row[coord_x_col]),
+                "coord_y": float(row[coord_y_col]),
+                "coord_z": float(row[coord_z_col]),
                 "label": int(row[label_col]),
-                "diameter_mm": float(row["diameter_mm"]) if "diameter_mm" in df.columns else 0.0,
+                "diameter_mm": float(row[diam_col]) if diam_col else 0.0,
             })
         return samples
 
