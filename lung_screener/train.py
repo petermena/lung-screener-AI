@@ -184,6 +184,7 @@ class Trainer:
         """Run validation."""
         self.model.eval()
         total_loss = 0.0
+        loss_count = 0
         correct = 0
         total = 0
         all_probs = []
@@ -200,7 +201,10 @@ class Trainer:
                 output = self.model(patches)
                 loss = self.criterion(output["logits"], labels)
 
-            total_loss += loss.item() * patches.size(0)
+            batch_loss = loss.item()
+            if np.isfinite(batch_loss):
+                total_loss += batch_loss * patches.size(0)
+                loss_count += patches.size(0)
             probs = torch.softmax(output["logits"], dim=1)[:, 1]
             preds = (probs > 0.5).long()
             correct += (preds == labels).sum().item()
@@ -220,7 +224,7 @@ class Trainer:
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
         metrics = {
-            "loss": total_loss / total,
+            "loss": total_loss / loss_count if loss_count > 0 else float("nan"),
             "accuracy": correct / total,
             "precision": precision,
             "recall": recall,
@@ -257,7 +261,7 @@ class Trainer:
         tp_rate = np.concatenate([[0], tp_rate])
         fp_rate = np.concatenate([[0], fp_rate])
 
-        auc = np.trapz(tp_rate, fp_rate)
+        auc = np.trapezoid(tp_rate, fp_rate)
         return float(auc)
 
     def save_checkpoint(

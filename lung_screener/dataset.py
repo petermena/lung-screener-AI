@@ -14,7 +14,7 @@ import torch
 from scipy import ndimage
 from torch.utils.data import ConcatDataset, Dataset
 
-from .preprocessing import CTPreprocessor, extract_patch, load_mhd
+from .preprocessing import CTPreprocessor, apply_hu_window, extract_patch, load_mhd
 
 logger = logging.getLogger(__name__)
 
@@ -435,10 +435,21 @@ class LUNA25Dataset(Dataset):
         self.aug_intensity_shift = aug_config.get("intensity_shift", 0.0)
         self.aug_intensity_scale = aug_config.get("intensity_scale", 0.0)
 
+        # Preprocessing params for block normalization
+        hu_config = config.get("preprocessing", {}).get("hu_window", {})
+        self._hu_min = hu_config.get("min", -1200)
+        self._hu_max = hu_config.get("max", 600)
+        self._do_normalize = config.get("preprocessing", {}).get("normalize", True)
+
         # Detect layout: nodule blocks vs full volumes
         self.nodule_blocks = (self.dataset_dir / "image").is_dir()
 
         self.samples = self._load_samples(val_split)
+
+        # Auto-detect whether blocks need HU normalization
+        self._blocks_need_normalization = (
+            self._detect_block_normalization() if self.nodule_blocks else False
+        )
 
         # Volume cache (only used for full-volume mode)
         self._volume_cache: dict[str, np.ndarray] = {}
@@ -581,15 +592,58 @@ class LUNA25Dataset(Dataset):
         return positives + negatives
 
     # ------------------------------------------------------------------
+    # Block normalization detection
+    # ------------------------------------------------------------------
+
+    def _detect_block_normalization(self) -> bool:
+        """Check whether pre-extracted blocks need HU normalization.
+
+        Samples the first block and checks its value range.  Blocks with
+        values outside [-0.5, 1.5] are assumed to be in raw Hounsfield
+        Units and will be windowed + normalized to [0, 1] on load.
+        """
+        if not self.samples:
+            return False
+        sample = self.samples[0]
+        npy_path = self.dataset_dir / "image" / f"{sample['annotation_id']}.npy"
+        if not npy_path.exists():
+            return False
+        block = np.load(npy_path).astype(np.float32)
+        vmin, vmax = float(block.min()), float(block.max())
+        needs_norm = vmin < -0.5 or vmax > 1.5
+        if needs_norm:
+            logger.info(
+                "LUNA25 blocks in HU range [%.1f, %.1f]; "
+                "will apply HU windowing + normalization to [0, 1]",
+                vmin, vmax,
+            )
+        else:
+            logger.info(
+                "LUNA25 blocks already in [%.2f, %.2f]; skipping normalization",
+                vmin, vmax,
+            )
+        return needs_norm
+
+    # ------------------------------------------------------------------
     # Volume / patch loading
     # ------------------------------------------------------------------
 
     def _load_block(self, annotation_id: str) -> np.ndarray | None:
-        """Load a pre-extracted nodule block (.npy)."""
+        """Load a pre-extracted nodule block (.npy).
+
+        If blocks are in raw HU values (auto-detected at init), applies
+        the same HU windowing + [0, 1] normalization used by the
+        full-volume pipeline.
+        """
         npy_path = self.dataset_dir / "image" / f"{annotation_id}.npy"
         if not npy_path.exists():
             return None
-        return np.load(npy_path, mmap_mode="r").astype(np.float32)
+        block = np.load(npy_path, mmap_mode="r").astype(np.float32)
+        if self._blocks_need_normalization:
+            block = apply_hu_window(
+                block, self._hu_min, self._hu_max, self._do_normalize,
+            )
+        return block
 
     def _find_volume_path(self, seriesuid: str) -> Path | None:
         """Find a .mha or .mhd file for *seriesuid*."""
