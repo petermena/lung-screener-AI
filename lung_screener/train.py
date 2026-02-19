@@ -103,6 +103,9 @@ class Trainer:
             self.config, split="val", augment=False,
         )
 
+        self._log_class_balance("train", train_dataset)
+        self._log_class_balance("val", val_dataset)
+
         logger.info(f"Training samples: {len(train_dataset)}")
         logger.info(f"Validation samples: {len(val_dataset)}")
 
@@ -138,6 +141,41 @@ class Trainer:
         )
 
         return train_loader, val_loader
+
+    def _log_class_balance(self, split: str, dataset: CombinedLungDataset) -> None:
+        """Log positive/negative sample counts for quick imbalance diagnostics."""
+        positives = 0
+        negatives = 0
+
+        for child in dataset.datasets:
+            samples = getattr(child, "samples", None)
+            if samples is None:
+                continue
+            child_pos = sum(1 for sample in samples if int(sample.get("label", 0)) == 1)
+            child_neg = len(samples) - child_pos
+            positives += child_pos
+            negatives += child_neg
+
+        total = positives + negatives
+        if total == 0:
+            logger.warning("%s split has no samples", split)
+            return
+
+        pos_rate = positives / total
+        neg_rate = negatives / total
+        logger.info(
+            "%s class balance — positives: %d (%.2f%%), negatives: %d (%.2f%%)",
+            split.capitalize(),
+            positives,
+            pos_rate * 100,
+            negatives,
+            neg_rate * 100,
+        )
+        logger.info(
+            "%s naive baseline (always negative) accuracy: %.4f",
+            split.capitalize(),
+            neg_rate,
+        )
 
     def train_epoch(self, loader: DataLoader) -> dict[str, float]:
         """Run one training epoch."""
