@@ -106,6 +106,13 @@ class Trainer:
         logger.info(f"Training samples: {len(train_dataset)}")
         logger.info(f"Validation samples: {len(val_dataset)}")
 
+        # Pre-populate disk cache so DataLoader workers find fast .npy
+        # files instead of having to load and resample raw .mhd volumes
+        # (~30-60s each).  This is a one-time cost; subsequent runs are
+        # instant.
+        train_dataset.warm_disk_cache()
+        val_dataset.warm_disk_cache()
+
         num_workers = train_config.get("num_workers", 4)
         pin_memory = torch.cuda.is_available()
 

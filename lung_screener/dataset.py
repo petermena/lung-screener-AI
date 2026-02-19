@@ -13,6 +13,7 @@ import pandas as pd
 import torch
 from scipy import ndimage
 from torch.utils.data import ConcatDataset, Dataset
+from tqdm import tqdm
 
 from .preprocessing import CTPreprocessor, apply_hu_window, extract_patch, load_mhd
 
@@ -211,11 +212,48 @@ class LUNA16Dataset(Dataset):
             except OSError:
                 tmp_path.unlink(missing_ok=True)
 
-        # Keep in memory cache (limit to ~50 volumes; ~300MB each ≈ 15GB max)
-        if len(self._volume_cache) < 50:
+        # Keep in memory cache (limit to ~20 volumes to stay within 16GB RAM
+        # when DataLoader workers each hold their own copy)
+        if len(self._volume_cache) < 20:
             self._volume_cache[seriesuid] = volume
 
         return volume
+
+    def _warm_cache(self):
+        """Pre-populate the disk cache for all unique volumes.
+
+        Runs in the main process before DataLoader workers are spawned so
+        that workers find fast .npy files instead of raw .mhd volumes.
+        """
+        if not self.cache_dir:
+            logger.warning(
+                "LUNA16: No cache_dir configured — volume loading will be slow"
+            )
+            return
+
+        unique_series = sorted(set(s["seriesuid"] for s in self.samples))
+        uncached = [
+            s for s in unique_series
+            if not (self.cache_dir / f"{s}.npy").exists()
+        ]
+
+        if not uncached:
+            logger.info(
+                "LUNA16: All %d volumes already cached on disk", len(unique_series)
+            )
+            return
+
+        logger.info(
+            "LUNA16: Pre-caching %d/%d volumes to %s (one-time cost)...",
+            len(uncached),
+            len(unique_series),
+            self.cache_dir,
+        )
+        for seriesuid in tqdm(uncached, desc="Caching LUNA16 volumes"):
+            self._load_volume(seriesuid)
+
+        # Free RAM before DataLoader workers fork
+        self._volume_cache.clear()
 
     def _world_to_voxel(
         self, world_coord: tuple[float, float, float], origin: tuple, spacing: tuple
@@ -693,10 +731,48 @@ class LUNA25Dataset(Dataset):
             except OSError:
                 tmp_path.unlink(missing_ok=True)
 
-        if len(self._volume_cache) < 50:
+        if len(self._volume_cache) < 20:
             self._volume_cache[seriesuid] = volume
 
         return volume
+
+    def _warm_cache(self):
+        """Pre-populate the disk cache (full-volume mode only).
+
+        Nodule-block mode already loads fast .npy patches, so no
+        warming is needed there.
+        """
+        if self.nodule_blocks:
+            return  # Already fast — pre-extracted .npy blocks
+
+        if not self.cache_dir:
+            logger.warning(
+                "LUNA25: No cache_dir configured — volume loading will be slow"
+            )
+            return
+
+        unique_series = sorted(set(s["seriesuid"] for s in self.samples))
+        uncached = [
+            s for s in unique_series
+            if not (self.cache_dir / f"luna25_{s}.npy").exists()
+        ]
+
+        if not uncached:
+            logger.info(
+                "LUNA25: All %d volumes already cached on disk", len(unique_series)
+            )
+            return
+
+        logger.info(
+            "LUNA25: Pre-caching %d/%d volumes to %s (one-time cost)...",
+            len(uncached),
+            len(unique_series),
+            self.cache_dir,
+        )
+        for seriesuid in tqdm(uncached, desc="Caching LUNA25 volumes"):
+            self._load_volume(seriesuid)
+
+        self._volume_cache.clear()
 
     # ------------------------------------------------------------------
     # Augmentation (delegates to LUNA16Dataset helpers)
@@ -930,3 +1006,13 @@ class CombinedLungDataset(ConcatDataset):
         combined = cls(child_datasets)
         logger.info("Combined dataset (%s): %d total samples", split, len(combined))
         return combined
+
+    def warm_disk_cache(self):
+        """Pre-populate the disk cache for all constituent datasets.
+
+        Call this in the main process *before* creating DataLoader workers
+        so that workers find fast cached .npy files on disk.
+        """
+        for ds in self.datasets:
+            if hasattr(ds, "_warm_cache"):
+                ds._warm_cache()
