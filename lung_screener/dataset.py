@@ -219,15 +219,20 @@ class LUNA16Dataset(Dataset):
         return None
 
     def _load_volume(self, seriesuid: str) -> np.ndarray | None:
-        """Load and preprocess a volume, with caching."""
+        """Load and preprocess a volume, with caching.
+
+        Disk-cached volumes are memory-mapped (``mmap_mode='r'``) so that
+        only the small patch region accessed by ``extract_patch`` is actually
+        read from disk, rather than the entire ~100-200 MB file.
+        """
         if seriesuid in self._volume_cache:
             return self._volume_cache[seriesuid]
 
-        # Check disk cache
+        # Check disk cache — memory-map instead of full load
         if self.cache_dir:
             cache_path = self.cache_dir / f"{seriesuid}.npy"
             if cache_path.exists():
-                volume = np.load(cache_path).astype(np.float32)
+                volume = np.load(cache_path, mmap_mode="r")
                 self._volume_cache[seriesuid] = volume
                 return volume
 
@@ -252,10 +257,9 @@ class LUNA16Dataset(Dataset):
             except OSError:
                 tmp_path.unlink(missing_ok=True)
 
-        # Keep in memory cache (limit to ~20 volumes to stay within 16GB RAM
-        # when DataLoader workers each hold their own copy)
-        if len(self._volume_cache) < 20:
-            self._volume_cache[seriesuid] = volume
+        # Mmap references are lightweight (no RAM copies), so cache all of
+        # them.  The OS page cache handles the actual memory management.
+        self._volume_cache[seriesuid] = volume
 
         return volume
 
@@ -444,7 +448,7 @@ class LUNA16Dataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         sample = self.samples[idx]
 
-        # Load volume
+        # Load volume (may be memory-mapped float16 from disk cache)
         volume = self._load_volume(sample["seriesuid"])
         if volume is None:
             # Return zeros if volume can't be loaded (shouldn't happen in practice)
@@ -462,13 +466,16 @@ class LUNA16Dataset(Dataset):
                 max(0, min(c, s - 1)) for c, s in zip(center_voxel, volume.shape)
             )
             patch = extract_patch(volume, center_voxel, self.patch_size)
+            # Ensure float32 (disk cache stores float16 for space efficiency)
+            if patch.dtype != np.float32:
+                patch = patch.astype(np.float32)
 
         # Augmentation
         if self.augment:
             patch = self._augment_patch(patch)
 
         # Convert to tensor: (1, D, H, W)
-        patch_tensor = torch.from_numpy(patch).unsqueeze(0).float()
+        patch_tensor = torch.from_numpy(np.ascontiguousarray(patch)).unsqueeze(0).float()
         label_tensor = torch.tensor(sample["label"], dtype=torch.long)
 
         return {
@@ -761,7 +768,7 @@ class LUNA25Dataset(Dataset):
         if self.cache_dir:
             cache_path = self.cache_dir / f"luna25_{seriesuid}.npy"
             if cache_path.exists():
-                volume = np.load(cache_path).astype(np.float32)
+                volume = np.load(cache_path, mmap_mode="r")
                 self._volume_cache[seriesuid] = volume
                 return volume
 
@@ -785,8 +792,7 @@ class LUNA25Dataset(Dataset):
             except OSError:
                 tmp_path.unlink(missing_ok=True)
 
-        if len(self._volume_cache) < 20:
-            self._volume_cache[seriesuid] = volume
+        self._volume_cache[seriesuid] = volume
 
         return volume
 
@@ -904,6 +910,10 @@ class LUNA25Dataset(Dataset):
                     max(0, min(c, s - 1)) for c, s in zip(center_voxel, volume.shape)
                 )
                 patch = extract_patch(volume, center_voxel, self.patch_size)
+
+        # Ensure float32 (disk cache / blocks may be float16)
+        if patch.dtype != np.float32:
+            patch = patch.astype(np.float32)
 
         if self.augment:
             patch = self._augment_patch(patch)
