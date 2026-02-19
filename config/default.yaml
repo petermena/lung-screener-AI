@@ -42,7 +42,7 @@ training:
   # headroom for the main process and OS. Going higher causes CPU contention.
   num_workers: 2
   # Positive/negative ratio for sampling
-  pos_neg_ratio: 0.2
+  pos_neg_ratio: 0.5
   # Data augmentation
   augmentation:
     rotation: true
