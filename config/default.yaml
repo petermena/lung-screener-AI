@@ -35,7 +35,7 @@ training:
   # Batch 24 uses ~5-6GB with AMP. T4 has less memory bandwidth than A4000,
   # so slightly smaller batches reduce risk of OOM from activation spikes.
   batch_size: 24
-  learning_rate: 0.001
+  learning_rate: 0.0001
   weight_decay: 0.0001
   epochs: 100
   # DataLoader workers — g4dn.xlarge has 4 vCPUs, use 2 workers to leave

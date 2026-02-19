@@ -55,10 +55,10 @@ class Trainer:
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
 
-        # Loss function with class weights (nodules are rare)
-        self.criterion = nn.CrossEntropyLoss(
-            weight=torch.tensor([1.0, 5.0]).to(self.device)
-        )
+        # Loss function — no class weights needed since dataset balancing
+        # (pos_neg_ratio) already handles the imbalance. Combining both
+        # caused exploding gradients and model collapse.
+        self.criterion = nn.CrossEntropyLoss()
 
         # Mixed precision
         self.scaler = GradScaler("cuda", enabled=torch.cuda.is_available())
@@ -153,6 +153,8 @@ class Trainer:
                 loss = self.criterion(output["logits"], labels)
 
             self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
