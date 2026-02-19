@@ -16,7 +16,7 @@ from scipy import ndimage
 from torch.utils.data import ConcatDataset, Dataset
 from tqdm import tqdm
 
-from .preprocessing import CTPreprocessor, apply_hu_window, extract_patch, load_mhd
+from .preprocessing import CTPreprocessor, apply_hu_window, extract_patch, load_mhd, read_volume_origin
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +29,15 @@ def _cache_luna16_volume(args: tuple) -> str | None:
 
     Designed to run in a :class:`ProcessPoolExecutor` worker.  Returns the
     *seriesuid* on success or ``None`` on failure.
+
+    Saves both the preprocessed volume (``.npy``) and a small origin
+    sidecar (``_origin.npy``) so that world→voxel coordinate conversion
+    is possible without re-reading the raw ``.mhd`` file.
     """
     seriesuid, dataset_dir, cache_dir, config = args
     cache_path = Path(cache_dir) / f"{seriesuid}.npy"
-    if cache_path.exists():
+    origin_path = Path(cache_dir) / f"{seriesuid}_origin.npy"
+    if cache_path.exists() and origin_path.exists():
         return seriesuid  # already cached
 
     # Find the .mhd file across subset directories
@@ -46,15 +51,26 @@ def _cache_luna16_volume(args: tuple) -> str | None:
         return None
 
     try:
+        # If only origin sidecar is missing, read just the header (fast)
+        if cache_path.exists() and not origin_path.exists():
+            origin = read_volume_origin(mhd_path)
+            np.save(origin_path, np.array(origin, dtype=np.float64))
+            return seriesuid
+
         preprocessor = CTPreprocessor(config)
         image = load_mhd(mhd_path)
         result = preprocessor.process_scan(image, training_mode=True)
         volume = result["volume"]
+        origin = result["origin"]
 
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         tmp_path = Path(cache_dir) / f"{seriesuid}.tmp.{os.getpid()}.npy"
         np.save(tmp_path, volume.astype(np.float16))
         os.replace(tmp_path, cache_path)
+
+        # Save origin sidecar
+        np.save(origin_path, np.array(origin, dtype=np.float64))
+
         return seriesuid
     except Exception:
         return None
@@ -108,6 +124,8 @@ class LUNA16Dataset(Dataset):
 
         # Cache for loaded volumes (seriesuid -> volume)
         self._volume_cache: dict[str, np.ndarray] = {}
+        # Cache for volume origins (seriesuid -> (ox, oy, oz) in mm, x/y/z order)
+        self._origin_cache: dict[str, tuple] = {}
 
     def _load_samples(self, val_split: float) -> list[dict]:
         """Load and merge annotations with candidates, then split."""
@@ -244,6 +262,7 @@ class LUNA16Dataset(Dataset):
         image = load_mhd(mhd_path)
         result = self.preprocessor.process_scan(image, training_mode=True)
         volume = result["volume"]
+        origin = result["origin"]
 
         # Save to disk cache (atomic write to avoid corruption from parallel workers)
         if self.cache_dir:
@@ -256,6 +275,14 @@ class LUNA16Dataset(Dataset):
                 os.replace(tmp_path, cache_path)
             except OSError:
                 tmp_path.unlink(missing_ok=True)
+
+            # Save origin sidecar for world→voxel conversion
+            origin_path = self.cache_dir / f"{seriesuid}_origin.npy"
+            if not origin_path.exists():
+                np.save(origin_path, np.array(origin, dtype=np.float64))
+
+        # Cache origin in memory
+        self._origin_cache[seriesuid] = origin
 
         # Mmap references are lightweight (no RAM copies), so cache all of
         # them.  The OS page cache handles the actual memory management.
@@ -278,9 +305,12 @@ class LUNA16Dataset(Dataset):
             return
 
         unique_series = sorted(set(s["seriesuid"] for s in self.samples))
+
+        # Volumes that need full caching OR just an origin sidecar
         uncached = [
             s for s in unique_series
             if not (self.cache_dir / f"{s}.npy").exists()
+            or not (self.cache_dir / f"{s}_origin.npy").exists()
         ]
 
         if not uncached:
@@ -321,6 +351,44 @@ class LUNA16Dataset(Dataset):
             int(round((w - o) / s)) for w, o, s in zip(world_coord, origin, spacing)
         )
         return voxel
+
+    def _load_origin(self, seriesuid: str) -> tuple[float, ...]:
+        """Load the spatial origin for a cached volume.
+
+        Checks (in order): in-memory cache → origin sidecar on disk →
+        raw ``.mhd`` header.  The result is saved to the sidecar and
+        the in-memory cache for fast subsequent access.
+
+        Returns:
+            ``(ox, oy, oz)`` origin in mm (SimpleITK x/y/z convention).
+        """
+        if seriesuid in self._origin_cache:
+            return self._origin_cache[seriesuid]
+
+        # Try sidecar file
+        if self.cache_dir:
+            origin_path = self.cache_dir / f"{seriesuid}_origin.npy"
+            if origin_path.exists():
+                origin = tuple(np.load(origin_path).tolist())
+                self._origin_cache[seriesuid] = origin
+                return origin
+
+        # Fallback: read .mhd header (fast, no pixel data loaded)
+        mhd_path = self._find_volume_path(seriesuid)
+        if mhd_path is None:
+            return (0.0, 0.0, 0.0)
+        origin = read_volume_origin(mhd_path)
+
+        # Persist so future runs are instant
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            np.save(
+                self.cache_dir / f"{seriesuid}_origin.npy",
+                np.array(origin, dtype=np.float64),
+            )
+
+        self._origin_cache[seriesuid] = origin
+        return origin
 
     def _augment_patch(self, patch: np.ndarray) -> np.ndarray:
         """Apply random data augmentation to a 3D patch.
@@ -454,12 +522,15 @@ class LUNA16Dataset(Dataset):
             # Return zeros if volume can't be loaded (shouldn't happen in practice)
             patch = np.zeros(self.patch_size, dtype=np.float32)
         else:
-            # The coordinates in LUNA16 are world coordinates (x, y, z)
-            # SimpleITK uses (x, y, z) ordering, numpy uses (z, y, x)
+            # LUNA16 coordinates are in world space (mm).  Convert to voxel
+            # indices using the volume's spatial origin and target spacing.
+            # SimpleITK origin/spacing are (x, y, z); numpy arrays are (z, y, x).
+            origin = self._load_origin(sample["seriesuid"])
+            spacing = self.preprocessor.target_spacing  # (x, y, z)
             center_voxel = (
-                int(round(sample["coord_z"])),
-                int(round(sample["coord_y"])),
-                int(round(sample["coord_x"])),
+                int(round((sample["coord_z"] - origin[2]) / spacing[2])),
+                int(round((sample["coord_y"] - origin[1]) / spacing[1])),
+                int(round((sample["coord_x"] - origin[0]) / spacing[0])),
             )
             # Clamp to volume bounds
             center_voxel = tuple(
@@ -553,6 +624,8 @@ class LUNA25Dataset(Dataset):
 
         # Volume cache (only used for full-volume mode)
         self._volume_cache: dict[str, np.ndarray] = {}
+        # Origin cache for world→voxel conversion (full-volume mode only)
+        self._origin_cache: dict[str, tuple] = {}
 
     # ------------------------------------------------------------------
     # Sample loading
@@ -728,6 +801,37 @@ class LUNA25Dataset(Dataset):
     # Volume / patch loading
     # ------------------------------------------------------------------
 
+    def _load_origin(self, seriesuid: str) -> tuple[float, ...]:
+        """Load the spatial origin for a cached volume (full-volume mode).
+
+        Same strategy as :meth:`LUNA16Dataset._load_origin`: memory cache →
+        origin sidecar → raw file header.
+        """
+        if seriesuid in self._origin_cache:
+            return self._origin_cache[seriesuid]
+
+        if self.cache_dir:
+            origin_path = self.cache_dir / f"luna25_{seriesuid}_origin.npy"
+            if origin_path.exists():
+                origin = tuple(np.load(origin_path).tolist())
+                self._origin_cache[seriesuid] = origin
+                return origin
+
+        vol_path = self._find_volume_path(seriesuid)
+        if vol_path is None:
+            return (0.0, 0.0, 0.0)
+        origin = read_volume_origin(vol_path)
+
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            np.save(
+                self.cache_dir / f"luna25_{seriesuid}_origin.npy",
+                np.array(origin, dtype=np.float64),
+            )
+
+        self._origin_cache[seriesuid] = origin
+        return origin
+
     def _load_block(self, annotation_id: str) -> np.ndarray | None:
         """Load a pre-extracted nodule block (.npy).
 
@@ -780,6 +884,7 @@ class LUNA25Dataset(Dataset):
         image = load_mhd(vol_path)
         result = self.preprocessor.process_scan(image, training_mode=True)
         volume = result["volume"]
+        origin = result["origin"]
 
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -792,6 +897,12 @@ class LUNA25Dataset(Dataset):
             except OSError:
                 tmp_path.unlink(missing_ok=True)
 
+            # Save origin sidecar for world→voxel conversion
+            origin_path = self.cache_dir / f"luna25_{seriesuid}_origin.npy"
+            if not origin_path.exists():
+                np.save(origin_path, np.array(origin, dtype=np.float64))
+
+        self._origin_cache[seriesuid] = origin
         self._volume_cache[seriesuid] = volume
 
         return volume
@@ -901,10 +1012,14 @@ class LUNA25Dataset(Dataset):
             if volume is None:
                 patch = np.zeros(self.patch_size, dtype=np.float32)
             else:
+                # Convert world coordinates (mm) to voxel indices.
+                # Origin/spacing are (x, y, z); numpy array is (z, y, x).
+                origin = self._load_origin(sample["seriesuid"])
+                spacing = self.preprocessor.target_spacing  # (x, y, z)
                 center_voxel = (
-                    int(round(sample["coord_z"])),
-                    int(round(sample["coord_y"])),
-                    int(round(sample["coord_x"])),
+                    int(round((sample["coord_z"] - origin[2]) / spacing[2])),
+                    int(round((sample["coord_y"] - origin[1]) / spacing[1])),
+                    int(round((sample["coord_x"] - origin[0]) / spacing[0])),
                 )
                 center_voxel = tuple(
                     max(0, min(c, s - 1)) for c, s in zip(center_voxel, volume.shape)

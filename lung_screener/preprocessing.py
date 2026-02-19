@@ -67,6 +67,21 @@ def load_mha(mha_path: str | Path) -> sitk.Image:
     return sitk.ReadImage(str(mha_path))
 
 
+def read_volume_origin(path: str | Path) -> tuple[float, ...]:
+    """Read the spatial origin of a .mhd/.mha volume without loading pixel data.
+
+    Uses SimpleITK's ``ReadImageInformation()`` to read only the header,
+    making this much faster than a full ``ReadImage()`` call.
+
+    Returns:
+        Origin as ``(x, y, z)`` tuple in millimetres (SimpleITK convention).
+    """
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(str(path))
+    reader.ReadImageInformation()
+    return reader.GetOrigin()
+
+
 def resample_volume(
     image: sitk.Image,
     target_spacing: tuple[float, float, float] = (1.0, 1.0, 1.0),
