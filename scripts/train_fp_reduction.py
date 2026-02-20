@@ -58,15 +58,17 @@ def score_candidates(
 ) -> dict[str, np.ndarray]:
     """Run the first-stage model over all candidates and collect scores.
 
+    Only stores lightweight metadata (labels, probs, series) — NOT the
+    patches themselves, which would require ~55 GB for 132K candidates.
+    Patches are collected separately for the subset that passes filtering.
+
     Returns:
         Dict with keys:
-            patches: (N, 1, D, H, W) float32 array
             labels:  (N,) int array (ground-truth)
             probs:   (N,) float32 array (first-stage nodule probability)
             series:  (N,) list of seriesuid strings
     """
     first_stage_model.eval()
-    all_patches = []
     all_labels = []
     all_probs = []
     all_series = []
@@ -81,17 +83,36 @@ def score_candidates(
 
         probs = torch.softmax(output["logits"], dim=1)[:, 1].cpu().numpy()
 
-        all_patches.append(patches.cpu().numpy())
         all_labels.append(labels)
         all_probs.append(probs)
         all_series.extend(series)
 
+        del patches, output
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
     return {
-        "patches": np.concatenate(all_patches, axis=0),
         "labels": np.concatenate(all_labels, axis=0),
         "probs": np.concatenate(all_probs, axis=0),
         "series": all_series,
     }
+
+
+def collect_patches(
+    dataset: Dataset,
+    indices: np.ndarray,
+    batch_size: int = 64,
+) -> np.ndarray:
+    """Load patches for a specific subset of indices from the dataset.
+
+    This avoids storing all 132K patches in RAM — only the subset needed
+    for FP reduction training is loaded (typically a few thousand).
+    """
+    patches = []
+    for i in tqdm(indices, desc="Collecting patches for FP reduction"):
+        sample = dataset[int(i)]
+        patches.append(sample["patch"].numpy())
+    return np.stack(patches, axis=0)
 
 
 # ======================================================================
@@ -162,6 +183,7 @@ class FPReductionDataset(Dataset):
 
 def build_fp_datasets(
     scored: dict[str, np.ndarray],
+    source_dataset: Dataset,
     threshold: float,
     val_fraction: float = 0.2,
     hard_negative_ratio: float = 1.0,
@@ -169,7 +191,8 @@ def build_fp_datasets(
     """Split scored candidates into FP-reduction train/val sets.
 
     Args:
-        scored: Output from score_candidates().
+        scored: Output from score_candidates() (labels, probs, series only).
+        source_dataset: The original dataset to load patches from.
         threshold: First-stage threshold — candidates above this are
             passed to the FP reduction stage.
         val_fraction: Fraction of data for validation.
@@ -180,7 +203,6 @@ def build_fp_datasets(
     Returns:
         (train_dataset, val_dataset)
     """
-    patches = scored["patches"]
     labels = scored["labels"]
     probs = scored["probs"]
     series = scored["series"]
@@ -251,13 +273,19 @@ def build_fp_datasets(
         int((val_labels == 0).sum()),
     )
 
+    # Collect only the patches we actually need (typically a few thousand
+    # instead of all 132K) — this saves ~50 GB of RAM.
+    logger.info("  Loading patches for selected candidates...")
+    train_patches = collect_patches(source_dataset, train_indices)
+    val_patches = collect_patches(source_dataset, val_indices)
+
     train_ds = FPReductionDataset(
-        patches=patches[train_indices],
+        patches=train_patches,
         labels=train_labels,
         augment=True,
     )
     val_ds = FPReductionDataset(
-        patches=patches[val_indices],
+        patches=val_patches,
         labels=val_labels,
         augment=False,
     )
@@ -835,21 +863,29 @@ def main():
     train_dataset = CombinedLungDataset.from_config(scoring_config, split="train", augment=False)
     train_dataset.warm_disk_cache()
 
+    num_workers = config.get("training", {}).get("num_workers", 2)
     scoring_loader = DataLoader(
         train_dataset,
         batch_size=args.score_batch_size,
         shuffle=False,
-        num_workers=config.get("training", {}).get("num_workers", 2),
+        num_workers=num_workers,
         pin_memory=device.type == "cuda",
+        persistent_workers=num_workers > 0,
     )
     logger.info("  Training candidates to score: %d", len(train_dataset))
 
     scored = score_candidates(first_stage_model, scoring_loader, device)
+    del scoring_loader  # release worker processes
     logger.info(
         "  Scored %d candidates (%.1f%% positive)",
         len(scored["labels"]),
         100.0 * scored["labels"].mean(),
     )
+
+    # Free first-stage model from GPU before loading patches
+    del first_stage_model, ckpt
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
     # Step 3: Build datasets and train FPReductionNet
@@ -858,6 +894,7 @@ def main():
 
     train_ds, val_ds = build_fp_datasets(
         scored,
+        source_dataset=train_dataset,
         threshold=stage1_threshold,
         val_fraction=0.2,
         hard_negative_ratio=args.hard_negative_ratio,
@@ -875,7 +912,7 @@ def main():
     best_ckpt_path = trainer.train(train_ds, val_ds)
 
     # Free scored data from memory
-    del scored, train_ds, val_ds
+    del scored, train_dataset, train_ds, val_ds
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
