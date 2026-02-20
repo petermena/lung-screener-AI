@@ -19,6 +19,9 @@ import torch
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 
+# NumPy 2.0 renamed np.trapz → np.trapezoid
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 from .calibration import _expected_calibration_error
 from .dataset import CombinedLungDataset
 from .model import build_model
@@ -195,7 +198,7 @@ def _compute_auc(labels: np.ndarray, probs: np.ndarray) -> float:
     tp_rate = np.concatenate([[0], tp_rate])
     fp_rate = np.concatenate([[0], fp_rate])
 
-    return float(np.trapezoid(tp_rate, fp_rate))
+    return float(_trapezoid(tp_rate, fp_rate))
 
 
 def _bootstrap_auc_ci(

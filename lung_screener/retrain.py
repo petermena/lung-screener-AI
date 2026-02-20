@@ -22,6 +22,9 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
+
+# NumPy 2.0 renamed np.trapz → np.trapezoid
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
 from torch.utils.data import DataLoader
 
 from .dataset import LUNA16Dataset
@@ -557,7 +560,7 @@ class IncrementalRetrainer:
         tp_rate = np.concatenate([[0], tp_rate])
         fp_rate = np.concatenate([[0], fp_rate])
 
-        return float(np.trapezoid(tp_rate, fp_rate))
+        return float(_trapezoid(tp_rate, fp_rate))
 
     def get_retrain_history(self) -> list[dict]:
         """Load the history of all past retrain cycles."""

@@ -16,6 +16,9 @@ import torch
 import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+
+# NumPy 2.0 renamed np.trapz → np.trapezoid
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -268,7 +271,7 @@ class Trainer:
         tp_rate = np.concatenate([[0], tp_rate])
         fp_rate = np.concatenate([[0], fp_rate])
 
-        auc = np.trapezoid(tp_rate, fp_rate)
+        auc = _trapezoid(tp_rate, fp_rate)
         return float(auc)
 
     def save_checkpoint(
