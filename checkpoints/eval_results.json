@@ -1,0 +1,132 @@
+{
+  "checkpoint": "checkpoints/best.pth",
+  "epoch": 76,
+  "num_samples": 6233,
+  "num_positives": 420,
+  "num_negatives": 5813,
+  "threshold": 0.5,
+  "confusion_matrix": {
+    "tp": 367,
+    "fp": 305,
+    "fn": 53,
+    "tn": 5508
+  },
+  "metrics": {
+    "auc_roc": 0.9817,
+    "auc_95ci_low": 0.9775,
+    "auc_95ci_high": 0.985,
+    "sensitivity": 0.8738,
+    "specificity": 0.9475,
+    "precision": 0.5461,
+    "recall": 0.8738,
+    "f1_score": 0.6722,
+    "accuracy": 0.9426,
+    "npv": 0.9905,
+    "ece": 0.0453
+  },
+  "optimal_threshold": {
+    "threshold": 0.15,
+    "youden_j": 0.8623
+  },
+  "operating_points": [
+    {
+      "threshold": 0.1,
+      "sensitivity": 0.9548,
+      "specificity": 0.9033,
+      "precision": 0.4164,
+      "tp": 401,
+      "fp": 562,
+      "fn": 19,
+      "tn": 5251
+    },
+    {
+      "threshold": 0.2,
+      "sensitivity": 0.9429,
+      "specificity": 0.9193,
+      "precision": 0.4578,
+      "tp": 396,
+      "fp": 469,
+      "fn": 24,
+      "tn": 5344
+    },
+    {
+      "threshold": 0.3,
+      "sensitivity": 0.9143,
+      "specificity": 0.9291,
+      "precision": 0.4824,
+      "tp": 384,
+      "fp": 412,
+      "fn": 36,
+      "tn": 5401
+    },
+    {
+      "threshold": 0.4,
+      "sensitivity": 0.9,
+      "specificity": 0.9363,
+      "precision": 0.5053,
+      "tp": 378,
+      "fp": 370,
+      "fn": 42,
+      "tn": 5443
+    },
+    {
+      "threshold": 0.5,
+      "sensitivity": 0.8738,
+      "specificity": 0.9475,
+      "precision": 0.5461,
+      "tp": 367,
+      "fp": 305,
+      "fn": 53,
+      "tn": 5508
+    },
+    {
+      "threshold": 0.6,
+      "sensitivity": 0.8595,
+      "specificity": 0.9549,
+      "precision": 0.5795,
+      "tp": 361,
+      "fp": 262,
+      "fn": 59,
+      "tn": 5551
+    },
+    {
+      "threshold": 0.7,
+      "sensitivity": 0.8452,
+      "specificity": 0.963,
+      "precision": 0.6228,
+      "tp": 355,
+      "fp": 215,
+      "fn": 65,
+      "tn": 5598
+    },
+    {
+      "threshold": 0.8,
+      "sensitivity": 0.8119,
+      "specificity": 0.9711,
+      "precision": 0.6699,
+      "tp": 341,
+      "fp": 168,
+      "fn": 79,
+      "tn": 5645
+    },
+    {
+      "threshold": 0.9,
+      "sensitivity": 0.7476,
+      "specificity": 0.9831,
+      "precision": 0.7621,
+      "tp": 314,
+      "fp": 98,
+      "fn": 106,
+      "tn": 5715
+    }
+  ],
+  "froc_sensitivity": {
+    "sens_at_fpr_0.0125": 0.7048,
+    "sens_at_fpr_0.025": 0.8024,
+    "sens_at_fpr_0.05": 0.8667,
+    "sens_at_fpr_0.1": 0.9548,
+    "sens_at_fpr_0.2": 0.9952,
+    "sens_at_fpr_0.4": 1.0,
+    "sens_at_fpr_0.8": 1.0
+  }
+}
