@@ -6,7 +6,7 @@ AI-powered lung nodule detection for CT scans with GE Centricity PACS integratio
 
 Lung Screener AI is a deep learning system that detects and classifies lung nodules on chest CT scans. It provides:
 
-- **3D CNN models** (ResNet3D / DenseNet3D) trained on the LUNA16 dataset
+- **3D CNN models** (ResNet3D / DenseNet3D) trained on LUNA16 + LUNA25 datasets
 - **Automated Lung-RADS categorization** based on nodule size
 - **DICOM networking** for direct PACS integration via C-STORE SCP/SCU
 - **Structured Report generation** to send findings back to PACS
@@ -85,6 +85,34 @@ lung-screener serve -m ./checkpoints/best.pth --port 11112
 2. Configure auto-routing rules to push chest CT studies to this destination
 3. Edit `config/default.yaml` to set your Centricity connection details under `pacs:`
 
+## Model Performance
+
+Evaluated on LUNA16 + LUNA25 combined dataset (6,233 candidates; 420 positives, 5,813 negatives) at epoch 76.
+
+| Metric | Value |
+|--------|-------|
+| AUC-ROC | **0.982** (95% CI: 0.978–0.985) |
+| Sensitivity | 95.5% @ threshold 0.15 |
+| Specificity | 90.3% @ threshold 0.15 |
+| NPV | 99.1% |
+| ECE (calibration) | 0.045 |
+
+**FROC sensitivity** (sensitivity at given false-positive rates per scan):
+
+| FP rate | 0.0125 | 0.025 | 0.05 | 0.1 | 0.2 | 0.4 |
+|---------|--------|-------|------|-----|-----|-----|
+| Sensitivity | 70.5% | 80.2% | 86.7% | 95.5% | 99.5% | 100% |
+
+**Operating-point trade-offs:**
+
+| Threshold | Sensitivity | Specificity | Precision |
+|-----------|-------------|-------------|-----------|
+| 0.10 | 95.5% | 90.3% | 41.6% |
+| 0.15 (optimal) | — | — | — |
+| 0.20 | 94.3% | 91.9% | 45.8% |
+| 0.50 | 87.4% | 94.8% | 54.6% |
+| 0.90 | 74.8% | 98.3% | 76.2% |
+
 ## Configuration
 
 All settings are in `config/default.yaml`. Key options:
@@ -94,7 +122,7 @@ All settings are in `config/default.yaml`. Key options:
 | `model.architecture` | `resnet3d` | `resnet3d` or `densenet3d` |
 | `model.patch_size` | `[48,48,48]` | 3D patch size for candidates |
 | `preprocessing.target_spacing` | `[1,1,1]` | Isotropic resampling (mm) |
-| `inference.threshold` | `0.5` | Detection confidence threshold |
+| `inference.threshold` | `0.15` | Detection confidence threshold (Youden's J optimal) |
 | `pacs.local_port` | `11112` | DICOM listener port |
 | `pacs.remote_ae_title` | `GEPACS` | Your Centricity AE title |
 
@@ -114,11 +142,10 @@ lung_screener/
 
 ## Training Data
 
-This system is designed to train on the [LUNA16](https://luna16.grand-challenge.org/) dataset, which is derived from the LIDC-IDRI collection. The dataset contains:
+This system trains on two public datasets:
 
-- 888 CT scans with expert nodule annotations
-- Annotations include nodule location (x, y, z) and diameter
-- Candidate locations with class labels (nodule / non-nodule)
+- **[LUNA16](https://luna16.grand-challenge.org/)** (derived from LIDC-IDRI): 888 CT scans with expert nodule annotations including location (x, y, z) and diameter, plus candidate locations with class labels
+- **[LUNA25](https://luna25.grand-challenge.org/)**: Additional annotated nodule data with volumetric blocks and full CT volumes
 
 ## Lung-RADS Categories
 
