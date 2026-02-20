@@ -106,6 +106,29 @@ def train(ctx, epochs, batch_size, lr, resume, checkpoint_dir, dataset):
     trainer.train(resume_from=resume)
 
 
+@main.command(name="evaluate")
+@click.option("--checkpoint", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
+@click.option("--output", "-o", type=click.Path(), help="Output JSON results file")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory for metrics")
+@click.pass_context
+def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir):
+    """Evaluate model on the validation set with comprehensive metrics.
+
+    Produces AUC-ROC (with 95% CI), sensitivity, specificity, precision,
+    F1, ECE, operating point table, and FROC sensitivity.
+
+    \b
+    Examples:
+        lung-screener evaluate -m checkpoints/best.pth
+        lung-screener evaluate -m checkpoints/best.pth -o eval_results.json
+    """
+    from .evaluate import evaluate, format_report
+
+    config = ctx.obj["config"]
+    results = evaluate(config, checkpoint, output_path=output)
+    click.echo(format_report(results))
+
+
 @main.command()
 @click.argument("input_path", type=click.Path(exists=True))
 @click.option("--model", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")

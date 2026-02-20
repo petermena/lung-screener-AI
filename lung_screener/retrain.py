@@ -557,7 +557,7 @@ class IncrementalRetrainer:
         tp_rate = np.concatenate([[0], tp_rate])
         fp_rate = np.concatenate([[0], fp_rate])
 
-        return float(np.trapz(tp_rate, fp_rate))
+        return float(np.trapezoid(tp_rate, fp_rate))
 
     def get_retrain_history(self) -> list[dict]:
         """Load the history of all past retrain cycles."""

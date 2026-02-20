@@ -268,7 +268,7 @@ class Trainer:
         tp_rate = np.concatenate([[0], tp_rate])
         fp_rate = np.concatenate([[0], fp_rate])
 
-        auc = np.trapz(tp_rate, fp_rate)
+        auc = np.trapezoid(tp_rate, fp_rate)
         return float(auc)
 
     def save_checkpoint(
