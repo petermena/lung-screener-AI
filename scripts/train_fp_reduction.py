@@ -354,8 +354,8 @@ class FPReductionTrainer:
             weight_decay=self.weight_decay,
         )
 
-        # Loss — use class weights if dataset is imbalanced
-        self.criterion = nn.CrossEntropyLoss()
+        # Loss — will be configured with class weights in train()
+        self.criterion = None
 
         # Mixed precision
         self.scaler = GradScaler("cuda", enabled=torch.cuda.is_available())
@@ -384,6 +384,32 @@ class FPReductionTrainer:
         Returns:
             Path to best checkpoint.
         """
+        # Compute class weights from training data to handle imbalance
+        train_labels = train_dataset.labels
+        num_neg = int((train_labels == 0).sum())
+        num_pos = int((train_labels == 1).sum())
+        if num_pos > 0 and num_neg > 0:
+            # Inverse frequency weighting: give the minority class higher weight
+            weight_neg = len(train_labels) / (2.0 * num_neg)
+            weight_pos = len(train_labels) / (2.0 * num_pos)
+            # Optional manual scaling from config
+            fp_cfg = self.config.get("fp_reduction_training", {})
+            scale = fp_cfg.get("class_weight_scale", 1.0)
+            weight_pos *= scale
+            class_weights = torch.tensor(
+                [weight_neg, weight_pos], dtype=torch.float32
+            ).to(self.device)
+            logger.info(
+                "Class weights — neg: %.3f  pos: %.3f  "
+                "(train has %d neg / %d pos, scale=%.1f)",
+                weight_neg, weight_pos, num_neg, num_pos, scale,
+            )
+        else:
+            class_weights = None
+            logger.warning("Could not compute class weights (pos=%d, neg=%d)", num_pos, num_neg)
+
+        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+
         pin_memory = self.device.type == "cuda"
 
         train_loader = DataLoader(

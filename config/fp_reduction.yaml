@@ -22,6 +22,10 @@ fp_reduction_training:
   weight_decay: 0.0001
   early_stopping_patience: 12
   num_workers: 2
+  # Scale factor for the positive-class weight (default 1.0).
+  # Increase (e.g. 1.5) to push the model harder toward sensitivity;
+  # decrease (e.g. 0.7) to favor specificity.
+  class_weight_scale: 1.0
 
 # Second-stage inference settings
 fp_reduction:
