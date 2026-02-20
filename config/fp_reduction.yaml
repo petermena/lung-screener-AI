@@ -1,0 +1,33 @@
+# FP Reduction Training Configuration
+#
+# Overrides for the second-stage false-positive reduction pipeline.
+# Merge with default.yaml:
+#
+#   python scripts/train_fp_reduction.py --config config/fp_reduction.yaml
+#
+# Designed for AWS g4dn.xlarge (T4 16GB) or p3.2xlarge (V100 16GB).
+
+# Use all negatives when scoring candidates so we capture every
+# hard false positive. A very low pos_neg_ratio effectively disables
+# undersampling during the scoring pass.
+training:
+  pos_neg_ratio: 0.01
+  num_workers: 2
+
+# FP reduction model training hyperparameters
+fp_reduction_training:
+  epochs: 60
+  batch_size: 32
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  early_stopping_patience: 12
+  num_workers: 2
+
+# Second-stage inference settings
+fp_reduction:
+  enabled: true
+  threshold: 0.5
+
+# First-stage threshold for hard-negative mining
+inference:
+  threshold: 0.15
