@@ -571,7 +571,12 @@ class Trainer:
         logger.info(f"Training complete. Best validation AUC: {self.best_val_auc:.4f}")
 
 
-def train_kfold(config: dict, n_folds: int = 5, checkpoint_dir: str | Path = "./checkpoints"):
+def train_kfold(
+    config: dict,
+    n_folds: int = 5,
+    checkpoint_dir: str | Path = "./checkpoints",
+    resume: bool = False,
+):
     """Run k-fold cross-validation training.
 
     Trains ``n_folds`` independent models, each validated on a
@@ -582,6 +587,8 @@ def train_kfold(config: dict, n_folds: int = 5, checkpoint_dir: str | Path = "./
         config: Full configuration dict.
         n_folds: Number of folds.
         checkpoint_dir: Root checkpoint directory.
+        resume: If True, skip completed folds and resume incomplete ones
+            from their ``latest.pth`` checkpoint.
 
     Returns:
         Dict with per-fold and aggregated metrics.
@@ -593,9 +600,43 @@ def train_kfold(config: dict, n_folds: int = 5, checkpoint_dir: str | Path = "./
         fold_dir = checkpoint_dir / f"fold_{fold}"
         fold_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"\n{'='*60}")
-        logger.info(f"  K-FOLD: Fold {fold + 1}/{n_folds}")
-        logger.info(f"{'='*60}\n")
+        best_path = fold_dir / "best.pth"
+        latest_path = fold_dir / "latest.pth"
+
+        # --- Resume logic ---------------------------------------------------
+        if resume and best_path.exists():
+            # Check if this fold ran to completion by inspecting the latest
+            # checkpoint's epoch against the configured total.
+            ckpt = torch.load(latest_path if latest_path.exists() else best_path,
+                              map_location="cpu", weights_only=False)
+            total_epochs = config.get("training", {}).get("epochs", 150)
+            finished_epoch = ckpt.get("epoch", 0)
+
+            if finished_epoch >= total_epochs - 1 and ckpt.get("phase") == "complete":
+                # Fold fully finished — load its metrics and skip.
+                auc = ckpt.get("best_val_auc",
+                               ckpt.get("metrics", {}).get("auc", 0.0))
+                logger.info(f"\n{'='*60}")
+                logger.info(f"  K-FOLD: Fold {fold + 1}/{n_folds}  [SKIPPED — already complete, AUC={auc:.4f}]")
+                logger.info(f"{'='*60}\n")
+                all_fold_metrics.append({
+                    "fold": fold,
+                    "best_val_auc": auc,
+                    "checkpoint": str(best_path),
+                })
+                continue
+
+        resume_path: Path | None = None
+        if resume and latest_path.exists():
+            resume_path = latest_path
+            ckpt = torch.load(latest_path, map_location="cpu", weights_only=False)
+            logger.info(f"\n{'='*60}")
+            logger.info(f"  K-FOLD: Fold {fold + 1}/{n_folds}  [RESUMING from epoch {ckpt.get('epoch', 0) + 1}]")
+            logger.info(f"{'='*60}\n")
+        else:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"  K-FOLD: Fold {fold + 1}/{n_folds}")
+            logger.info(f"{'='*60}\n")
 
         # Inject fold index into config so the dataset can split accordingly
         fold_config = copy.deepcopy(config)
@@ -606,7 +647,7 @@ def train_kfold(config: dict, n_folds: int = 5, checkpoint_dir: str | Path = "./
         }
 
         trainer = Trainer(fold_config, checkpoint_dir=fold_dir)
-        trainer.train()
+        trainer.train(resume_from=resume_path)
 
         fold_metrics = {
             "fold": fold,

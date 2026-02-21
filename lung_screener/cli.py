@@ -134,6 +134,8 @@ def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir):
 @click.option("--epochs", type=int, help="Override number of training epochs")
 @click.option("--batch-size", type=int, help="Override batch size")
 @click.option("--lr", type=float, help="Override learning rate")
+@click.option("--resume", is_flag=True, default=False,
+              help="Resume: skip completed folds, resume incomplete ones from latest checkpoint")
 @click.option("--checkpoint-dir", default="./checkpoints", help="Root checkpoint directory")
 @click.option(
     "--dataset",
@@ -142,7 +144,7 @@ def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir):
     help="Add a dataset (repeatable)",
 )
 @click.pass_context
-def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, checkpoint_dir, dataset):
+def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, resume, checkpoint_dir, dataset):
     """Run k-fold cross-validation training.
 
     Trains K independent models, each validated on a different fold
@@ -151,9 +153,14 @@ def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, checkpoint_dir, dataset)
 
     Fold models can later be ensembled for the best possible inference.
 
+    Pass --resume to pick up where a crashed or interrupted run left off.
+    Completed folds are skipped and partially-trained folds resume from
+    their latest checkpoint.
+
     \b
     Examples:
         lung-screener train-kfold -k 5
+        lung-screener train-kfold -k 5 --resume
         lung-screener train-kfold -k 5 --dataset luna16 ./data/luna16 --dataset luna25 ./data/luna25
     """
     from .train import train_kfold
@@ -170,7 +177,7 @@ def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, checkpoint_dir, dataset)
             {"type": kind, "dataset_dir": path} for kind, path in dataset
         ]
 
-    summary = train_kfold(config, n_folds=folds, checkpoint_dir=checkpoint_dir)
+    summary = train_kfold(config, n_folds=folds, checkpoint_dir=checkpoint_dir, resume=resume)
 
     click.echo("")
     click.echo(f"K-Fold Training Complete ({summary['n_folds']} folds)")
