@@ -37,27 +37,27 @@ training:
   loss:
     type: "focal"
     focal_gamma: 2.0
-    focal_alpha: 0.75
-    label_smoothing: 0.05   # Prevents overconfident predictions
+    focal_alpha: 0.25       # Compensate for oversampled positives (pos_neg_ratio=0.5)
+    label_smoothing: 0.0    # Disabled — conflicts with focal loss
 
-  # Aggressive augmentation for a larger, more diverse training set
+  # Moderate augmentation — converge first, add aggressive augs later
   augmentation:
     rotation: true
     flip: true
-    scale_range: [0.85, 1.15]
-    noise_std: 0.02
-    elastic_deformation: true
+    scale_range: [0.9, 1.1]
+    noise_std: 0.01
+    elastic_deformation: false
     elastic_alpha: 20.0
     elastic_sigma: 3.5
-    intensity_shift: 0.08
-    intensity_scale: 0.08
+    intensity_shift: 0.05
+    intensity_scale: 0.05
     mixup_alpha: 0.0
-    # CutOut: forces model to learn from non-central features
-    cutout: true
+    # CutOut: disabled until model converges
+    cutout: false
     cutout_size: 12
     cutout_n_holes: 2
-    # Multi-scale training: captures both fine detail and context
-    multi_scale_patches: [36, 48, 60]
+    # Multi-scale training: disabled until model converges
+    # multi_scale_patches: [36, 48, 60]
 
   # Stochastic Weight Averaging: averages late-training checkpoints
   # for a flatter minimum that generalizes better.
