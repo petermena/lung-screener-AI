@@ -115,11 +115,16 @@ class Trainer:
         self.lr = train_config.get("learning_rate", 0.001)
         self.weight_decay = train_config.get("weight_decay", 0.0001)
         self.patience = train_config.get("early_stopping_patience", 15)
+        self.eval_threshold = train_config.get(
+            "eval_threshold",
+            config.get("inference", {}).get("threshold", 0.5),
+        )
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
+        logger.info(f"Metrics threshold: {self.eval_threshold:.3f}")
 
         # Loss function — select based on config
         loss_config = train_config.get("loss", {})
@@ -286,7 +291,7 @@ class Trainer:
 
             total_loss += loss.item() * patches.size(0)
             probs = torch.softmax(output["logits"], dim=1)[:, 1]
-            preds = (probs > 0.5).long()
+            preds = (probs >= self.eval_threshold).long()
             correct += (preds == labels).sum().item()
             total += patches.size(0)
 
@@ -332,7 +337,7 @@ class Trainer:
                 total_loss += batch_loss * patches.size(0)
                 loss_count += patches.size(0)
             probs = torch.softmax(output["logits"], dim=1)[:, 1]
-            preds = (probs > 0.5).long()
+            preds = (probs >= self.eval_threshold).long()
             correct += (preds == labels).sum().item()
             total += patches.size(0)
 
