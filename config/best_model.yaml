@@ -1,0 +1,99 @@
+# Lung Screener AI - Best Model Configuration
+#
+# Optimized for maximum accuracy on LUNA16 (888 studies) + LUNA25 (4000 studies).
+# Uses SE-ResNeXt3D architecture with all advanced training techniques enabled.
+#
+# Usage:
+#   lung-screener train -c config/best_model.yaml
+#   lung-screener train-kfold -k 5 -c config/best_model.yaml
+#   lung-screener evaluate -m checkpoints/best.pth -c config/best_model.yaml
+
+model:
+  # SE-ResNeXt3D: state-of-the-art architecture combining grouped
+  # convolutions, squeeze-and-excitation attention, multi-scale fusion,
+  # and stochastic depth regularization.
+  architecture: "se_resnext3d"
+  in_channels: 1
+  num_classes: 2
+  patch_size: [48, 48, 48]
+  predict_nodule_type: false
+  # Architecture hyperparameters tuned for T4 GPU
+  base_filters: 64
+  cardinality: 32
+  bottleneck_width: 4
+  se_reduction: 16
+  drop_path_rate: 0.2
+
+training:
+  batch_size: 16          # Smaller batch for larger model (T4 16GB VRAM)
+  learning_rate: 0.0002   # Slightly higher for AdamW with warm restarts
+  weight_decay: 0.0001
+  epochs: 150             # More epochs to benefit from warm restarts + SWA
+  num_workers: 2
+  pos_neg_ratio: 0.5
+
+  # Focal Loss: focuses training on hard-to-classify candidates,
+  # especially borderline nodules that standard CE treats equally.
+  loss:
+    type: "focal"
+    focal_gamma: 2.0
+    focal_alpha: null
+    label_smoothing: 0.05   # Prevents overconfident predictions
+
+  # Aggressive augmentation for a larger, more diverse training set
+  augmentation:
+    rotation: true
+    flip: true
+    scale_range: [0.85, 1.15]
+    noise_std: 0.02
+    elastic_deformation: true
+    elastic_alpha: 20.0
+    elastic_sigma: 3.5
+    intensity_shift: 0.08
+    intensity_scale: 0.08
+    mixup_alpha: 0.0
+    # CutOut: forces model to learn from non-central features
+    cutout: true
+    cutout_size: 12
+    cutout_n_holes: 2
+    # Multi-scale training: captures both fine detail and context
+    multi_scale_patches: [36, 48, 60]
+
+  # Stochastic Weight Averaging: averages late-training checkpoints
+  # for a flatter minimum that generalizes better.
+  swa:
+    enabled: true
+    start_epoch: 100      # SWA in final ~50 epochs
+    lr: 0.00005
+
+  early_stopping_patience: 20
+
+  # Cosine warm restarts: periodic LR resets help escape local minima
+  # and work synergistically with SWA.
+  scheduler:
+    type: "cosine_warm_restarts"
+    warmup_epochs: 5
+    t_0: 25               # First cycle: 25 epochs
+    t_mult: 2             # Double cycle length each restart
+
+inference:
+  threshold: 0.15
+  nms_distance_mm: 10.0
+  batch_size: 64          # Conservative for larger model
+  validate_input: true
+  # TTA: average predictions over 8 geometric transforms
+  tta:
+    enabled: true
+    n_augments: 8
+
+data:
+  dataset_dir: "./data/luna16"
+  cache_dir: "./data/cache"
+  val_split: 0.2
+  max_val_candidates: 5000
+  training_dir: "./data/training"
+  datasets:
+    - type: luna16
+      dataset_dir: "./data/luna16"
+    - type: luna25
+      dataset_dir: "./data/luna25"

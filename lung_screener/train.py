@@ -2,12 +2,18 @@
 
 Handles the full training loop with:
 - Mixed precision training
-- Learning rate scheduling with warmup
+- Focal Loss for hard-example mining
+- Stochastic Weight Averaging (SWA) for better generalisation
+- Label smoothing for calibration
+- Learning rate scheduling with warmup + cosine warm restarts
 - Early stopping
 - Checkpoint saving
+- K-fold cross-validation
 - Metrics logging and dashboard generation
 """
 
+import copy
+import json
 import logging
 from pathlib import Path
 
@@ -15,7 +21,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, LinearLR, SequentialLR
+from torch.optim.swa_utils import AveragedModel, SWALR
 
 # NumPy 2.0 renamed np.trapz → np.trapezoid
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz
@@ -27,6 +34,62 @@ from .metrics_dashboard import MetricsLogger, save_dashboard
 from .model import build_model
 
 logger = logging.getLogger(__name__)
+
+
+class FocalLoss(nn.Module):
+    """Focal Loss for class-imbalanced classification.
+
+    Focuses training on hard-to-classify examples by down-weighting
+    easy negatives.  Particularly effective for nodule detection where
+    most candidates are non-nodules.
+
+    ``FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)``
+
+    Args:
+        alpha: Per-class weight (scalar or list). Default balances
+               positive/negative classes.
+        gamma: Focusing parameter — larger values focus more on hard
+               examples. gamma=0 reduces to standard cross-entropy.
+        label_smoothing: Label smoothing factor (0 = no smoothing).
+    """
+
+    def __init__(
+        self,
+        alpha: float | list[float] | None = None,
+        gamma: float = 2.0,
+        label_smoothing: float = 0.0,
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
+        if alpha is not None:
+            if isinstance(alpha, (list, tuple)):
+                self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+            else:
+                self.register_buffer("alpha", torch.tensor([1 - alpha, alpha], dtype=torch.float32))
+        else:
+            self.alpha = None
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        num_classes = logits.shape[1]
+        probs = torch.softmax(logits, dim=1)
+
+        # One-hot with optional label smoothing
+        one_hot = torch.zeros_like(logits).scatter_(1, targets.unsqueeze(1), 1.0)
+        if self.label_smoothing > 0:
+            one_hot = one_hot * (1 - self.label_smoothing) + self.label_smoothing / num_classes
+
+        pt = (probs * one_hot).sum(dim=1)
+        focal_weight = (1 - pt) ** self.gamma
+        ce = -torch.log(pt.clamp(min=1e-8))
+
+        loss = focal_weight * ce
+
+        if self.alpha is not None:
+            alpha_t = self.alpha.to(logits.device)[targets]
+            loss = alpha_t * loss
+
+        return loss.mean()
 
 
 class Trainer:
@@ -58,29 +121,72 @@ class Trainer:
             self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
 
-        # Loss function — no class weights needed since dataset balancing
-        # (pos_neg_ratio) already handles the imbalance. Combining both
-        # caused exploding gradients and model collapse.
-        self.criterion = nn.CrossEntropyLoss()
+        # Loss function — select based on config
+        loss_config = train_config.get("loss", {})
+        loss_type = loss_config.get("type", "cross_entropy")
+        label_smoothing = loss_config.get("label_smoothing", 0.0)
+
+        if loss_type == "focal":
+            focal_gamma = loss_config.get("focal_gamma", 2.0)
+            focal_alpha = loss_config.get("focal_alpha", None)
+            self.criterion = FocalLoss(
+                alpha=focal_alpha,
+                gamma=focal_gamma,
+                label_smoothing=label_smoothing,
+            )
+            logger.info(f"Using Focal Loss (gamma={focal_gamma}, alpha={focal_alpha}, "
+                        f"label_smoothing={label_smoothing})")
+        else:
+            self.criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+            if label_smoothing > 0:
+                logger.info(f"Using CrossEntropyLoss with label_smoothing={label_smoothing}")
 
         # Mixed precision
         self.scaler = GradScaler("cuda", enabled=torch.cuda.is_available())
 
         # Scheduler
         sched_config = train_config.get("scheduler", {})
+        sched_type = sched_config.get("type", "cosine")
         warmup_epochs = sched_config.get("warmup_epochs", 5)
         warmup_epochs = min(warmup_epochs, max(self.epochs - 1, 0))
+
         warmup_scheduler = LinearLR(
             self.optimizer, start_factor=0.1, total_iters=max(warmup_epochs, 1)
         )
-        cosine_scheduler = CosineAnnealingLR(
-            self.optimizer, T_max=max(self.epochs - warmup_epochs, 1)
-        )
+
+        if sched_type == "cosine_warm_restarts":
+            # Cosine annealing with warm restarts — resets LR periodically
+            # to escape local minima and explore more of the loss landscape.
+            t_0 = sched_config.get("t_0", 20)
+            t_mult = sched_config.get("t_mult", 2)
+            main_scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer, T_0=t_0, T_mult=t_mult,
+            )
+            logger.info(f"Scheduler: Cosine warm restarts (T_0={t_0}, T_mult={t_mult})")
+        else:
+            main_scheduler = CosineAnnealingLR(
+                self.optimizer, T_max=max(self.epochs - warmup_epochs, 1)
+            )
+
         self.scheduler = SequentialLR(
             self.optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
+            schedulers=[warmup_scheduler, main_scheduler],
             milestones=[warmup_epochs],
         )
+
+        # SWA (Stochastic Weight Averaging) — averages weights from the
+        # later stages of training to find a flatter minimum that
+        # generalises better. Typically adds +0.5-1.5% AUC.
+        swa_config = train_config.get("swa", {})
+        self.swa_enabled = swa_config.get("enabled", False)
+        self.swa_start_epoch = swa_config.get("start_epoch", int(self.epochs * 0.75))
+        self.swa_lr = swa_config.get("lr", self.lr * 0.5)
+        self.swa_model = None
+        self.swa_scheduler = None
+        if self.swa_enabled:
+            self.swa_model = AveragedModel(self.model)
+            self.swa_scheduler = SWALR(self.optimizer, swa_lr=self.swa_lr)
+            logger.info(f"SWA enabled: starts epoch {self.swa_start_epoch}, lr={self.swa_lr}")
 
         # Metrics logger for dashboard
         self.metrics_logger = MetricsLogger(self.checkpoint_dir)
@@ -384,8 +490,19 @@ class Trainer:
                     epoch, train_metrics, is_best=False, phase="train_done"
                 )
 
-            # Validate
-            val_metrics = self.validate(val_loader)
+            # Validate — use SWA model for eval when active
+            if self.swa_enabled and epoch >= self.swa_start_epoch and self.swa_model is not None:
+                self.swa_model.update_parameters(self.model)
+                # BN update requires a forward pass over training data
+                torch.optim.swa_utils.update_bn(train_loader, self.swa_model, device=self.device)
+                # Validate with SWA-averaged model
+                original_model = self.model
+                self.model = self.swa_model
+                val_metrics = self.validate(val_loader)
+                self.model = original_model
+            else:
+                val_metrics = self.validate(val_loader)
+
             logger.info(
                 f"  Val   - Loss: {val_metrics['loss']:.4f}, "
                 f"Acc: {val_metrics['accuracy']:.4f}, "
@@ -394,8 +511,11 @@ class Trainer:
                 f"Spec: {val_metrics['specificity']:.4f}"
             )
 
-            # Step scheduler
-            self.scheduler.step()
+            # Step scheduler — switch to SWA scheduler after swa_start_epoch
+            if self.swa_enabled and epoch >= self.swa_start_epoch and self.swa_scheduler is not None:
+                self.swa_scheduler.step()
+            else:
+                self.scheduler.step()
 
             # Log metrics to dashboard
             current_lr = self.optimizer.param_groups[0]["lr"]
@@ -410,14 +530,37 @@ class Trainer:
                 self.epochs_without_improvement += 1
 
             # Save checkpoint (full epoch complete)
+            # When SWA is active, save the averaged model as best
             self.save_checkpoint(epoch, val_metrics, is_best)
 
-            # Early stopping
-            if self.epochs_without_improvement >= self.patience:
-                logger.info(
-                    f"Early stopping after {self.patience} epochs without improvement"
-                )
-                break
+            # Early stopping (disabled during SWA phase to let averaging converge)
+            if self.swa_enabled and epoch >= self.swa_start_epoch:
+                pass  # Don't early-stop during SWA
+            elif self.epochs_without_improvement >= self.patience:
+                if self.swa_enabled:
+                    logger.info(
+                        f"Early stopping triggered — switching to SWA phase "
+                        f"for final {self.epochs - epoch - 1} epochs"
+                    )
+                    self.swa_start_epoch = epoch + 1
+                else:
+                    logger.info(
+                        f"Early stopping after {self.patience} epochs without improvement"
+                    )
+                    break
+
+        # Save final SWA model if active
+        if self.swa_enabled and self.swa_model is not None:
+            logger.info("Saving SWA-averaged model as swa_best.pth")
+            torch.optim.swa_utils.update_bn(train_loader, self.swa_model, device=self.device)
+            swa_checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": self.swa_model.module.state_dict(),
+                "config": self.config,
+                "best_val_auc": self.best_val_auc,
+                "swa": True,
+            }
+            torch.save(swa_checkpoint, self.checkpoint_dir / "swa_best.pth")
 
         # Generate final dashboard
         dashboard_path = save_dashboard(
@@ -426,3 +569,72 @@ class Trainer:
         )
         logger.info(f"Training dashboard: {dashboard_path}")
         logger.info(f"Training complete. Best validation AUC: {self.best_val_auc:.4f}")
+
+
+def train_kfold(config: dict, n_folds: int = 5, checkpoint_dir: str | Path = "./checkpoints"):
+    """Run k-fold cross-validation training.
+
+    Trains ``n_folds`` independent models, each validated on a
+    different fold.  All fold checkpoints are saved so they can
+    later be ensembled for inference.
+
+    Args:
+        config: Full configuration dict.
+        n_folds: Number of folds.
+        checkpoint_dir: Root checkpoint directory.
+
+    Returns:
+        Dict with per-fold and aggregated metrics.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    all_fold_metrics: list[dict] = []
+
+    for fold in range(n_folds):
+        fold_dir = checkpoint_dir / f"fold_{fold}"
+        fold_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"\n{'='*60}")
+        logger.info(f"  K-FOLD: Fold {fold + 1}/{n_folds}")
+        logger.info(f"{'='*60}\n")
+
+        # Inject fold index into config so the dataset can split accordingly
+        fold_config = copy.deepcopy(config)
+        fold_config.setdefault("data", {})["kfold"] = {
+            "enabled": True,
+            "n_folds": n_folds,
+            "fold_index": fold,
+        }
+
+        trainer = Trainer(fold_config, checkpoint_dir=fold_dir)
+        trainer.train()
+
+        fold_metrics = {
+            "fold": fold,
+            "best_val_auc": trainer.best_val_auc,
+            "checkpoint": str(fold_dir / "best.pth"),
+        }
+        all_fold_metrics.append(fold_metrics)
+
+        logger.info(f"Fold {fold + 1} best AUC: {trainer.best_val_auc:.4f}")
+
+    # Aggregate
+    aucs = [m["best_val_auc"] for m in all_fold_metrics]
+    summary = {
+        "n_folds": n_folds,
+        "folds": all_fold_metrics,
+        "mean_auc": float(np.mean(aucs)),
+        "std_auc": float(np.std(aucs)),
+        "min_auc": float(np.min(aucs)),
+        "max_auc": float(np.max(aucs)),
+    }
+
+    summary_path = checkpoint_dir / "kfold_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+
+    logger.info(f"\nK-Fold Summary: AUC = {summary['mean_auc']:.4f} "
+                f"± {summary['std_auc']:.4f} "
+                f"(range {summary['min_auc']:.4f} - {summary['max_auc']:.4f})")
+    logger.info(f"Results saved to {summary_path}")
+
+    return summary

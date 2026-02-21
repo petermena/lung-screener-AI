@@ -1,7 +1,7 @@
 # Lung Screener AI - Default Configuration
 
 model:
-  # Architecture: "resnet3d" or "densenet3d"
+  # Architecture: "resnet3d", "densenet3d", or "se_resnext3d"
   architecture: "resnet3d"
   # Number of input channels (1 for CT grayscale)
   in_channels: 1
@@ -11,6 +11,12 @@ model:
   patch_size: [48, 48, 48]
   # Enable nodule type classification (solid, part-solid, ground-glass)
   predict_nodule_type: false
+  # SE-ResNeXt3D specific options (only used when architecture=se_resnext3d)
+  base_filters: 64
+  cardinality: 32
+  bottleneck_width: 4
+  se_reduction: 16
+  drop_path_rate: 0.2
 
 preprocessing:
   # Resample all scans to this spacing in mm (z, y, x)
@@ -44,6 +50,13 @@ training:
   # Positive/negative ratio for sampling
   pos_neg_ratio: 0.5
   # Data augmentation
+  # Loss function: "cross_entropy" or "focal"
+  loss:
+    type: "cross_entropy"
+    label_smoothing: 0.0
+    # Focal loss params (only when type=focal)
+    focal_gamma: 2.0
+    focal_alpha: null   # null = no per-class weighting
   augmentation:
     rotation: true
     flip: true
@@ -57,12 +70,27 @@ training:
     intensity_shift: 0.05
     intensity_scale: 0.05
     mixup_alpha: 0.0
+    # CutOut augmentation — masks random cubic regions for regularization
+    cutout: false
+    cutout_size: 12
+    cutout_n_holes: 1
+    # Multi-scale patch training — randomly sample from these sizes
+    # during training (resized to canonical patch_size). null = disabled
+    multi_scale_patches: null  # e.g. [32, 48, 64]
+  # Stochastic Weight Averaging (SWA)
+  swa:
+    enabled: false
+    start_epoch: 75       # Switch to SWA at this epoch
+    lr: 0.00005           # SWA learning rate
   # Early stopping patience (epochs)
   early_stopping_patience: 15
   # Learning rate scheduler
   scheduler:
-    type: "cosine"
+    type: "cosine"        # "cosine" or "cosine_warm_restarts"
     warmup_epochs: 5
+    # Warm restarts params (only when type=cosine_warm_restarts)
+    t_0: 20               # First restart period
+    t_mult: 2             # Period multiplier after each restart
 
 inference:
   # Classification threshold for nodule detection
@@ -77,6 +105,11 @@ inference:
   batch_size: 96
   # Input validation (verify chest CT before processing)
   validate_input: true
+  # Test-Time Augmentation (TTA) — averages predictions over geometric
+  # transforms for more robust classification (adds ~Nx inference time)
+  tta:
+    enabled: false
+    n_augments: 8         # Number of augmentation transforms (1-8)
 
 pacs:
   # DICOM Application Entity settings

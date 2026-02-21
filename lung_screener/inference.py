@@ -455,27 +455,34 @@ class NoduleDetector:
 
             patches_array = np.stack(patches)[:, np.newaxis, ...]  # (N, 1, D, H, W)
 
-            # Step 3: Classify in batches
-            all_probs = []
-            all_malignancy = []
-            all_nodule_types = []
-            for i in range(0, len(patches_array), self.batch_size):
-                batch = torch.from_numpy(
-                    patches_array[i : i + self.batch_size]
-                ).float().to(self.device)
+            # Step 3: Classify in batches (with optional TTA)
+            tta_enabled = self.config.get("inference", {}).get("tta", {}).get("enabled", False)
 
-                with autocast():
-                    output = self.model(batch)
+            if tta_enabled:
+                all_probs, all_malignancy, all_nodule_types = self._classify_with_tta(
+                    patches_array
+                )
+            else:
+                all_probs = []
+                all_malignancy = []
+                all_nodule_types = []
+                for i in range(0, len(patches_array), self.batch_size):
+                    batch = torch.from_numpy(
+                        patches_array[i : i + self.batch_size]
+                    ).float().to(self.device)
 
-                probs = torch.softmax(output["logits"], dim=1)[:, 1]
-                all_probs.extend(probs.cpu().numpy())
+                    with autocast():
+                        output = self.model(batch)
 
-                if "malignancy" in output:
-                    all_malignancy.extend(output["malignancy"].cpu().numpy().flatten())
+                    probs = torch.softmax(output["logits"], dim=1)[:, 1]
+                    all_probs.extend(probs.cpu().numpy())
 
-                if "nodule_type_logits" in output:
-                    type_preds = torch.argmax(output["nodule_type_logits"], dim=1)
-                    all_nodule_types.extend(type_preds.cpu().numpy())
+                    if "malignancy" in output:
+                        all_malignancy.extend(output["malignancy"].cpu().numpy().flatten())
+
+                    if "nodule_type_logits" in output:
+                        type_preds = torch.argmax(output["nodule_type_logits"], dim=1)
+                        all_nodule_types.extend(type_preds.cpu().numpy())
 
             # Step 4: Filter by threshold
             findings = []
@@ -552,6 +559,87 @@ class NoduleDetector:
                 error_message=str(e),
             )
 
+    @torch.no_grad()
+    def _classify_with_tta(
+        self, patches_array: np.ndarray
+    ) -> tuple[list[float], list[float], list[int]]:
+        """Classify patches with Test-Time Augmentation.
+
+        Applies multiple geometric transforms to each patch and averages
+        the predictions for more robust classification.  Typically
+        improves AUC by 0.5-1%.
+
+        Args:
+            patches_array: (N, 1, D, H, W) float32 array.
+
+        Returns:
+            Tuple of (probabilities, malignancy_scores, nodule_types).
+        """
+        tta_config = self.config.get("inference", {}).get("tta", {})
+        n_augments = tta_config.get("n_augments", 8)
+
+        # Generate TTA transforms: combinations of flips and 90-deg rotations
+        transforms = [lambda x: x]  # identity
+        if n_augments >= 2:
+            transforms.append(lambda x: np.flip(x, axis=2).copy())  # flip D
+        if n_augments >= 4:
+            transforms.append(lambda x: np.flip(x, axis=3).copy())  # flip H
+            transforms.append(lambda x: np.flip(x, axis=4).copy())  # flip W
+        if n_augments >= 8:
+            transforms.append(lambda x: np.rot90(x, 1, axes=(2, 3)).copy())
+            transforms.append(lambda x: np.rot90(x, 1, axes=(2, 4)).copy())
+            transforms.append(lambda x: np.rot90(x, 1, axes=(3, 4)).copy())
+            transforms.append(lambda x: np.flip(np.rot90(x, 1, axes=(2, 3)), axis=4).copy())
+
+        transforms = transforms[:n_augments]
+
+        all_probs_accum = np.zeros(len(patches_array), dtype=np.float64)
+        all_malignancy_accum = np.zeros(len(patches_array), dtype=np.float64)
+        all_type_votes = np.zeros((len(patches_array), 3), dtype=np.int32)
+        has_malignancy = False
+        has_types = False
+
+        for tfm in transforms:
+            aug_patches = tfm(patches_array)
+            probs_list = []
+            mal_list = []
+            type_list = []
+
+            for i in range(0, len(aug_patches), self.batch_size):
+                batch = torch.from_numpy(
+                    aug_patches[i: i + self.batch_size]
+                ).float().to(self.device)
+
+                with autocast():
+                    output = self.model(batch)
+
+                probs = torch.softmax(output["logits"], dim=1)[:, 1]
+                probs_list.extend(probs.cpu().numpy())
+
+                if "malignancy" in output:
+                    has_malignancy = True
+                    mal_list.extend(output["malignancy"].cpu().numpy().flatten())
+
+                if "nodule_type_logits" in output:
+                    has_types = True
+                    preds = torch.argmax(output["nodule_type_logits"], dim=1)
+                    type_list.extend(preds.cpu().numpy())
+
+            all_probs_accum += np.array(probs_list)
+            if has_malignancy:
+                all_malignancy_accum += np.array(mal_list)
+            if has_types:
+                for idx, t in enumerate(type_list):
+                    all_type_votes[idx, t] += 1
+
+        # Average probabilities across augmentations
+        n = len(transforms)
+        final_probs = (all_probs_accum / n).tolist()
+        final_malignancy = (all_malignancy_accum / n).tolist() if has_malignancy else []
+        final_types = all_type_votes.argmax(axis=1).tolist() if has_types else []
+
+        return final_probs, final_malignancy, final_types
+
     def _nms(self, findings: list[NoduleFinding]) -> list[NoduleFinding]:
         """Non-maximum suppression based on distance and confidence.
 
@@ -582,3 +670,145 @@ class NoduleDetector:
                 keep.append(finding)
 
         return keep
+
+
+class EnsembleDetector:
+    """Ensemble multiple NoduleDetector models for improved accuracy.
+
+    Loads multiple checkpoints (e.g. from k-fold training or different
+    architectures) and averages their predictions.  Ensemble methods
+    typically add 0.5-1.5% AUC over any single model.
+
+    Args:
+        config: Configuration dict.
+        model_paths: List of checkpoint paths to ensemble.
+        device: Torch device.
+    """
+
+    def __init__(
+        self,
+        config: dict,
+        model_paths: list[str | Path],
+        device: str | None = None,
+    ):
+        self.config = config
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        self.detectors = []
+        for path in model_paths:
+            det = NoduleDetector(config, model_path=path, device=str(self.device))
+            self.detectors.append(det)
+        logger.info(f"Ensemble: loaded {len(self.detectors)} models")
+
+    def predict_scan(self, image: sitk.Image, series_uid: str = "") -> ScanResult:
+        """Run ensemble prediction on a CT scan.
+
+        Each model independently classifies candidates, and their
+        probabilities are averaged.  This improves both accuracy and
+        calibration.
+        """
+        # Use the first detector's preprocessor for shared preprocessing
+        base = self.detectors[0]
+        try:
+            processed = base.preprocessor.process_scan(image)
+            volume = processed["volume"]
+            volume_hu = processed["volume_hu"]
+            candidates = processed["candidates"]
+            spacing = processed["spacing"]
+            origin = processed["origin"]
+
+            if not candidates:
+                return ScanResult(series_uid=series_uid)
+
+            vol_shape = volume.shape
+            z_min = origin[2]
+            z_max = origin[2] + vol_shape[0] * spacing[2]
+
+            patch_size = tuple(
+                self.config.get("model", {}).get("patch_size", [48, 48, 48])
+            )
+            patches = []
+            for cand in candidates:
+                patches.append(extract_patch(volume, cand["center_voxel"], patch_size))
+            patches_array = np.stack(patches)[:, np.newaxis, ...]
+
+            # Collect predictions from all models
+            ensemble_probs = np.zeros(len(patches_array), dtype=np.float64)
+            ensemble_malignancy = np.zeros(len(patches_array), dtype=np.float64)
+            mal_count = 0
+
+            for det in self.detectors:
+                all_probs = []
+                all_mal = []
+                for i in range(0, len(patches_array), det.batch_size):
+                    batch = torch.from_numpy(
+                        patches_array[i: i + det.batch_size]
+                    ).float().to(self.device)
+
+                    with torch.no_grad(), autocast():
+                        output = det.model(batch)
+
+                    probs = torch.softmax(output["logits"], dim=1)[:, 1]
+                    all_probs.extend(probs.cpu().numpy())
+                    if "malignancy" in output:
+                        all_mal.extend(output["malignancy"].cpu().numpy().flatten())
+
+                ensemble_probs += np.array(all_probs)
+                if all_mal:
+                    ensemble_malignancy += np.array(all_mal)
+                    mal_count += 1
+
+            # Average
+            n_models = len(self.detectors)
+            ensemble_probs /= n_models
+            if mal_count > 0:
+                ensemble_malignancy /= mal_count
+
+            # Build findings
+            threshold = self.config.get("inference", {}).get("threshold", 0.15)
+            findings = []
+            for idx, (cand, prob) in enumerate(zip(candidates, ensemble_probs)):
+                if prob >= threshold:
+                    center_world = tuple(
+                        o + c * s for o, c, s in zip(origin, cand["center_voxel"], spacing)
+                    )
+                    malignancy = float(ensemble_malignancy[idx]) * 4.0 + 1.0 if mal_count > 0 else 0.0
+                    wx, wy, wz = center_world[2], center_world[1], center_world[0]
+
+                    findings.append(NoduleFinding(
+                        x=wx, y=wy, z=wz,
+                        diameter_mm=cand["diameter_mm"],
+                        confidence=float(prob),
+                        malignancy_score=malignancy,
+                        lobe=estimate_lobe(wx, wy, wz, z_min, z_max),
+                        image_number=compute_image_number(wz, origin[2], spacing[2]),
+                        series_uid=series_uid,
+                    ))
+
+            # Calcification analysis
+            for finding_idx, (finding, cand) in enumerate(
+                zip(findings, [c for c, p in zip(candidates, ensemble_probs) if p >= threshold])
+            ):
+                try:
+                    from .calcification import analyze_calcification
+                    calc_result = analyze_calcification(
+                        volume_hu, cand["center_voxel"], cand["diameter_mm"], spacing,
+                    )
+                    finding.calcification = calc_result
+                    if calc_result.suggested_lung_rads_override:
+                        finding.lung_rads = calc_result.suggested_lung_rads_override
+                except Exception:
+                    pass
+
+            # NMS
+            findings = base._nms(findings)
+            return ScanResult(series_uid=series_uid, findings=findings)
+
+        except Exception as e:
+            logger.error(f"Ensemble error: {e}")
+            return ScanResult(
+                series_uid=series_uid,
+                processing_status="error",
+                error_message=str(e),
+            )

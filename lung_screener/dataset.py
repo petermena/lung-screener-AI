@@ -2,8 +2,16 @@
 
 Handles loading annotations, creating train/val splits, and providing
 3D patches with enhanced data augmentation for training.
+
+Key features:
+- LUNA16 and LUNA25 support with automatic format detection
+- K-fold cross-validation splitting
+- CutOut / random erasing augmentation
+- Multi-scale patch extraction (32, 48, 64)
+- Disk-cached, memory-mapped volume loading
 """
 
+import hashlib
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -118,6 +126,16 @@ class LUNA16Dataset(Dataset):
         self.aug_intensity_shift = aug_config.get("intensity_shift", 0.0)
         self.aug_intensity_scale = aug_config.get("intensity_scale", 0.0)
         self.aug_mixup_alpha = aug_config.get("mixup_alpha", 0.0)
+        # CutOut augmentation (random cubic erasing)
+        self.aug_cutout = aug_config.get("cutout", False)
+        self.aug_cutout_size = aug_config.get("cutout_size", 12)
+        self.aug_cutout_n_holes = aug_config.get("cutout_n_holes", 1)
+        # Multi-scale patch extraction — randomly sample from multiple
+        # patch sizes during training for scale-invariant features
+        self.multi_scale_sizes = aug_config.get("multi_scale_patches", None)
+
+        # K-fold support
+        self._kfold_config = config.get("data", {}).get("kfold", {})
 
         # Load annotations and candidates
         self.samples = self._load_samples(val_split)
@@ -177,12 +195,25 @@ class LUNA16Dataset(Dataset):
         unique_series = sorted(set(s["seriesuid"] for s in samples))
         np.random.seed(42)
         np.random.shuffle(unique_series)
-        split_idx = int(len(unique_series) * (1 - val_split))
 
-        if self.split == "train":
-            valid_series = set(unique_series[:split_idx])
+        # K-fold splitting
+        if self._kfold_config.get("enabled", False):
+            n_folds = self._kfold_config.get("n_folds", 5)
+            fold_idx = self._kfold_config.get("fold_index", 0)
+            fold_size = len(unique_series) // n_folds
+            val_start = fold_idx * fold_size
+            val_end = val_start + fold_size if fold_idx < n_folds - 1 else len(unique_series)
+
+            if self.split == "train":
+                valid_series = set(unique_series[:val_start] + unique_series[val_end:])
+            else:
+                valid_series = set(unique_series[val_start:val_end])
         else:
-            valid_series = set(unique_series[split_idx:])
+            split_idx = int(len(unique_series) * (1 - val_split))
+            if self.split == "train":
+                valid_series = set(unique_series[:split_idx])
+            else:
+                valid_series = set(unique_series[split_idx:])
 
         samples = [s for s in samples if s["seriesuid"] in valid_series]
 
@@ -442,6 +473,28 @@ class LUNA16Dataset(Dataset):
             noise = np.random.normal(0, self.aug_noise_std, patch.shape).astype(np.float32)
             patch = patch + noise
 
+        # CutOut / random erasing — masks out random cubic regions to
+        # force the model to learn from non-central features
+        if self.aug_cutout:
+            patch = self._cutout(patch)
+
+        return patch
+
+    def _cutout(self, patch: np.ndarray) -> np.ndarray:
+        """Apply CutOut augmentation: erase random cubic regions."""
+        h = self.aug_cutout_size
+        for _ in range(self.aug_cutout_n_holes):
+            cz = np.random.randint(0, patch.shape[0])
+            cy = np.random.randint(0, patch.shape[1])
+            cx = np.random.randint(0, patch.shape[2])
+            z1 = max(0, cz - h // 2)
+            z2 = min(patch.shape[0], cz + h // 2)
+            y1 = max(0, cy - h // 2)
+            y2 = min(patch.shape[1], cy + h // 2)
+            x1 = max(0, cx - h // 2)
+            x2 = min(patch.shape[2], cx + h // 2)
+            patch = patch.copy()
+            patch[z1:z2, y1:y2, x1:x2] = 0.0
         return patch
 
     def _elastic_deformation(
@@ -516,11 +569,18 @@ class LUNA16Dataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         sample = self.samples[idx]
 
+        # Multi-scale: randomly choose patch size during training
+        if self.augment and self.multi_scale_sizes:
+            scale = self.multi_scale_sizes[np.random.randint(len(self.multi_scale_sizes))]
+            current_patch_size = (scale, scale, scale)
+        else:
+            current_patch_size = self.patch_size
+
         # Load volume (may be memory-mapped float16 from disk cache)
         volume = self._load_volume(sample["seriesuid"])
         if volume is None:
             # Return zeros if volume can't be loaded (shouldn't happen in practice)
-            patch = np.zeros(self.patch_size, dtype=np.float32)
+            patch = np.zeros(current_patch_size, dtype=np.float32)
         else:
             # LUNA16 coordinates are in world space (mm).  Convert to voxel
             # indices using the volume's spatial origin and target spacing.
@@ -536,7 +596,7 @@ class LUNA16Dataset(Dataset):
             center_voxel = tuple(
                 max(0, min(c, s - 1)) for c, s in zip(center_voxel, volume.shape)
             )
-            patch = extract_patch(volume, center_voxel, self.patch_size)
+            patch = extract_patch(volume, center_voxel, current_patch_size)
             # Ensure float32 (disk cache stores float16 for space efficiency)
             if patch.dtype != np.float32:
                 patch = patch.astype(np.float32)
@@ -544,6 +604,10 @@ class LUNA16Dataset(Dataset):
         # Augmentation
         if self.augment:
             patch = self._augment_patch(patch)
+
+        # Resize to canonical patch_size if multi-scale produced a different size
+        if patch.shape != self.patch_size:
+            patch = self._crop_or_pad(patch, self.patch_size)
 
         # Convert to tensor: (1, D, H, W)
         patch_tensor = torch.from_numpy(np.ascontiguousarray(patch)).unsqueeze(0).float()
@@ -605,12 +669,19 @@ class LUNA25Dataset(Dataset):
         self.aug_elastic_sigma = aug_config.get("elastic_sigma", 3.0)
         self.aug_intensity_shift = aug_config.get("intensity_shift", 0.0)
         self.aug_intensity_scale = aug_config.get("intensity_scale", 0.0)
+        # CutOut augmentation
+        self.aug_cutout = aug_config.get("cutout", False)
+        self.aug_cutout_size = aug_config.get("cutout_size", 12)
+        self.aug_cutout_n_holes = aug_config.get("cutout_n_holes", 1)
 
         # Preprocessing params for block normalization
         hu_config = config.get("preprocessing", {}).get("hu_window", {})
         self._hu_min = hu_config.get("min", -1200)
         self._hu_max = hu_config.get("max", 600)
         self._do_normalize = config.get("preprocessing", {}).get("normalize", True)
+
+        # K-fold support
+        self._kfold_config = config.get("data", {}).get("kfold", {})
 
         # Detect layout: nodule blocks vs full volumes
         self.nodule_blocks = (self.dataset_dir / "image").is_dir()
@@ -656,12 +727,25 @@ class LUNA25Dataset(Dataset):
 
         np.random.seed(42)
         np.random.shuffle(unique_keys)
-        split_idx = int(len(unique_keys) * (1 - val_split))
 
-        if self.split == "train":
-            valid_keys = set(unique_keys[:split_idx])
+        # K-fold splitting
+        if self._kfold_config.get("enabled", False):
+            n_folds = self._kfold_config.get("n_folds", 5)
+            fold_idx = self._kfold_config.get("fold_index", 0)
+            fold_size = len(unique_keys) // n_folds
+            val_start = fold_idx * fold_size
+            val_end = val_start + fold_size if fold_idx < n_folds - 1 else len(unique_keys)
+
+            if self.split == "train":
+                valid_keys = set(unique_keys[:val_start] + unique_keys[val_end:])
+            else:
+                valid_keys = set(unique_keys[val_start:val_end])
         else:
-            valid_keys = set(unique_keys[split_idx:])
+            split_idx = int(len(unique_keys) * (1 - val_split))
+            if self.split == "train":
+                valid_keys = set(unique_keys[:split_idx])
+            else:
+                valid_keys = set(unique_keys[split_idx:])
 
         key_field = "annotation_id" if self.nodule_blocks else "seriesuid"
         samples = [s for s in samples if s[key_field] in valid_keys]
@@ -986,6 +1070,22 @@ class LUNA25Dataset(Dataset):
         if self.aug_noise_std > 0:
             noise = np.random.normal(0, self.aug_noise_std, patch.shape).astype(np.float32)
             patch = patch + noise
+
+        # CutOut
+        if self.aug_cutout:
+            h = self.aug_cutout_size
+            for _ in range(self.aug_cutout_n_holes):
+                cz = np.random.randint(0, patch.shape[0])
+                cy = np.random.randint(0, patch.shape[1])
+                cx = np.random.randint(0, patch.shape[2])
+                z1 = max(0, cz - h // 2)
+                z2 = min(patch.shape[0], cz + h // 2)
+                y1 = max(0, cy - h // 2)
+                y2 = min(patch.shape[1], cy + h // 2)
+                x1 = max(0, cx - h // 2)
+                x2 = min(patch.shape[2], cx + h // 2)
+                patch = patch.copy()
+                patch[z1:z2, y1:y2, x1:x2] = 0.0
 
         return patch
 

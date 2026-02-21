@@ -259,11 +259,60 @@ class TestTrainerInit:
         from lung_screener.model import NoduleDenseNet3D
         assert isinstance(trainer.model, NoduleDenseNet3D)
 
+    def test_trainer_se_resnext(self, fast_config, tmp_path):
+        fast_config["model"]["architecture"] = "se_resnext3d"
+        fast_config["model"]["base_filters"] = 32
+        fast_config["model"]["cardinality"] = 16
+        fast_config["model"]["bottleneck_width"] = 4
+        fast_config["model"]["se_reduction"] = 16
+        fast_config["model"]["drop_path_rate"] = 0.1
+        trainer = Trainer(fast_config, checkpoint_dir=tmp_path / "ckpts")
+        from lung_screener.model import NoduleSEResNeXt3D
+        assert isinstance(trainer.model, NoduleSEResNeXt3D)
+
     def test_trainer_optimizer_base_lr(self, fast_config, tmp_path):
         trainer = Trainer(fast_config, checkpoint_dir=tmp_path / "ckpts")
         # The scheduler sets initial LR = base_lr * start_factor (0.1),
         # so check the optimizer's base lr via the scheduler
         assert trainer.lr == fast_config["training"]["learning_rate"]
+
+    def test_trainer_focal_loss(self, fast_config, tmp_path):
+        fast_config["training"]["loss"] = {
+            "type": "focal",
+            "focal_gamma": 2.0,
+            "label_smoothing": 0.05,
+        }
+        trainer = Trainer(fast_config, checkpoint_dir=tmp_path / "ckpts")
+        from lung_screener.train import FocalLoss
+        assert isinstance(trainer.criterion, FocalLoss)
+
+    def test_trainer_label_smoothing(self, fast_config, tmp_path):
+        fast_config["training"]["loss"] = {
+            "type": "cross_entropy",
+            "label_smoothing": 0.1,
+        }
+        trainer = Trainer(fast_config, checkpoint_dir=tmp_path / "ckpts")
+        assert isinstance(trainer.criterion, torch.nn.CrossEntropyLoss)
+
+    def test_trainer_swa_config(self, fast_config, tmp_path):
+        fast_config["training"]["swa"] = {
+            "enabled": True,
+            "start_epoch": 1,
+            "lr": 0.00005,
+        }
+        trainer = Trainer(fast_config, checkpoint_dir=tmp_path / "ckpts")
+        assert trainer.swa_enabled is True
+        assert trainer.swa_model is not None
+
+    def test_trainer_cosine_warm_restarts(self, fast_config, tmp_path):
+        fast_config["training"]["scheduler"] = {
+            "type": "cosine_warm_restarts",
+            "warmup_epochs": 1,
+            "t_0": 5,
+            "t_mult": 2,
+        }
+        trainer = Trainer(fast_config, checkpoint_dir=tmp_path / "ckpts")
+        # Should not raise
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +424,41 @@ class TestAUCComputation:
 # End-to-end mini-training run
 # ---------------------------------------------------------------------------
 
+class TestFocalLoss:
+    def test_focal_loss_reduces_to_ce_at_gamma_zero(self):
+        """Focal Loss with gamma=0 should approximate standard CE."""
+        from lung_screener.train import FocalLoss
+
+        fl = FocalLoss(gamma=0.0, label_smoothing=0.0)
+        ce = torch.nn.CrossEntropyLoss()
+
+        logits = torch.randn(8, 2)
+        targets = torch.randint(0, 2, (8,))
+
+        fl_loss = fl(logits, targets)
+        ce_loss = ce(logits, targets)
+        assert abs(fl_loss.item() - ce_loss.item()) < 0.1
+
+    def test_focal_loss_down_weights_easy(self):
+        """Focal Loss should produce lower loss for easy examples."""
+        from lung_screener.train import FocalLoss
+
+        fl = FocalLoss(gamma=2.0, label_smoothing=0.0)
+
+        # Easy examples (high confidence correct predictions)
+        easy_logits = torch.tensor([[0.1, 5.0], [5.0, 0.1]])
+        easy_targets = torch.tensor([1, 0])
+
+        # Hard examples (low confidence)
+        hard_logits = torch.tensor([[0.0, 0.5], [0.5, 0.0]])
+        hard_targets = torch.tensor([1, 0])
+
+        easy_loss = fl(easy_logits, easy_targets)
+        hard_loss = fl(hard_logits, hard_targets)
+
+        assert easy_loss < hard_loss
+
+
 class TestEndToEnd:
     def test_full_training_run_2_epochs(self, fast_config, synthetic_luna16, tmp_path):
         """Full training run for 2 epochs on synthetic data.
@@ -395,3 +479,41 @@ class TestEndToEnd:
         assert (ckpt_dir / "latest.pth").exists()
         # Verify training completed (best_val_auc was set)
         assert trainer.best_val_auc >= 0
+
+    def test_se_resnext_training_run(self, fast_config, synthetic_luna16, tmp_path):
+        """Train SE-ResNeXt3D for 2 epochs to verify pipeline works."""
+        dataset_dir, cache_dir, _ = synthetic_luna16
+        fast_config["data"]["dataset_dir"] = str(dataset_dir)
+        fast_config["data"]["cache_dir"] = str(cache_dir)
+        fast_config["training"]["epochs"] = 2
+        fast_config["model"]["architecture"] = "se_resnext3d"
+        fast_config["model"]["base_filters"] = 16
+        fast_config["model"]["cardinality"] = 8
+        fast_config["model"]["bottleneck_width"] = 2
+        fast_config["model"]["se_reduction"] = 4
+        fast_config["model"]["drop_path_rate"] = 0.1
+
+        ckpt_dir = tmp_path / "ckpts"
+        trainer = Trainer(fast_config, checkpoint_dir=ckpt_dir)
+        trainer.train()
+
+        assert (ckpt_dir / "latest.pth").exists()
+        assert trainer.best_val_auc >= 0
+
+    def test_focal_loss_training_run(self, fast_config, synthetic_luna16, tmp_path):
+        """Train with Focal Loss for 2 epochs."""
+        dataset_dir, cache_dir, _ = synthetic_luna16
+        fast_config["data"]["dataset_dir"] = str(dataset_dir)
+        fast_config["data"]["cache_dir"] = str(cache_dir)
+        fast_config["training"]["epochs"] = 2
+        fast_config["training"]["loss"] = {
+            "type": "focal",
+            "focal_gamma": 2.0,
+            "label_smoothing": 0.05,
+        }
+
+        ckpt_dir = tmp_path / "ckpts"
+        trainer = Trainer(fast_config, checkpoint_dir=ckpt_dir)
+        trainer.train()
+
+        assert (ckpt_dir / "latest.pth").exists()

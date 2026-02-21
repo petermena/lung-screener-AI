@@ -310,6 +310,84 @@ def _youden_optimal(labels: np.ndarray, probs: np.ndarray) -> tuple[float, float
     return float(best_t), float(best_j)
 
 
+def evaluate_kfold(
+    config: dict,
+    checkpoint_dir: str | Path,
+    n_folds: int = 5,
+    output_path: str | Path | None = None,
+) -> dict:
+    """Evaluate all k-fold models and aggregate metrics.
+
+    Args:
+        config: Full configuration dict.
+        checkpoint_dir: Root checkpoint directory containing fold_0/ ... fold_N/.
+        n_folds: Number of folds.
+        output_path: Optional path for aggregated JSON results.
+
+    Returns:
+        Dict with per-fold and aggregated metrics.
+    """
+    import copy
+
+    checkpoint_dir = Path(checkpoint_dir)
+    fold_results = []
+
+    for fold in range(n_folds):
+        fold_dir = checkpoint_dir / f"fold_{fold}"
+        ckpt = fold_dir / "best.pth"
+        if not ckpt.exists():
+            logger.warning("Fold %d checkpoint not found at %s", fold, ckpt)
+            continue
+
+        logger.info(f"Evaluating fold {fold + 1}/{n_folds}")
+
+        # Inject fold config so evaluation uses the correct val split
+        fold_config = copy.deepcopy(config)
+        fold_config.setdefault("data", {})["kfold"] = {
+            "enabled": True,
+            "n_folds": n_folds,
+            "fold_index": fold,
+        }
+
+        fold_result = evaluate(fold_config, ckpt)
+        fold_result["fold"] = fold
+        fold_results.append(fold_result)
+
+    if not fold_results:
+        return {"error": "No fold checkpoints found"}
+
+    # Aggregate metrics across folds
+    metric_keys = list(fold_results[0]["metrics"].keys())
+    aggregated: dict = {"n_folds": len(fold_results), "folds": fold_results}
+    agg_metrics: dict = {}
+
+    for key in metric_keys:
+        values = [fr["metrics"][key] for fr in fold_results]
+        agg_metrics[f"{key}_mean"] = round(float(np.mean(values)), 4)
+        agg_metrics[f"{key}_std"] = round(float(np.std(values)), 4)
+        agg_metrics[f"{key}_min"] = round(float(np.min(values)), 4)
+        agg_metrics[f"{key}_max"] = round(float(np.max(values)), 4)
+
+    aggregated["aggregated_metrics"] = agg_metrics
+
+    if output_path:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        with open(output_path, "w") as f:
+            _json.dump(aggregated, f, indent=2)
+        logger.info("K-fold results written to %s", output_path)
+
+    # Log summary
+    auc_mean = agg_metrics.get("auc_roc_mean", 0)
+    auc_std = agg_metrics.get("auc_roc_std", 0)
+    logger.info(
+        "K-fold evaluation: AUC = %.4f ± %.4f", auc_mean, auc_std
+    )
+
+    return aggregated
+
+
 def format_report(results: dict) -> str:
     """Format evaluation results as a human-readable report."""
     m = results["metrics"]

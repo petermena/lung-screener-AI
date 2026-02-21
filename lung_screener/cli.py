@@ -129,6 +129,140 @@ def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir):
     click.echo(format_report(results))
 
 
+@main.command(name="train-kfold")
+@click.option("--folds", "-k", type=int, default=5, help="Number of folds")
+@click.option("--epochs", type=int, help="Override number of training epochs")
+@click.option("--batch-size", type=int, help="Override batch size")
+@click.option("--lr", type=float, help="Override learning rate")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Root checkpoint directory")
+@click.option(
+    "--dataset",
+    multiple=True,
+    type=(click.Choice(["luna16", "luna25"]), click.Path(exists=True)),
+    help="Add a dataset (repeatable)",
+)
+@click.pass_context
+def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, checkpoint_dir, dataset):
+    """Run k-fold cross-validation training.
+
+    Trains K independent models, each validated on a different fold
+    of the data.  Fold checkpoints are saved under the checkpoint
+    directory as fold_0/, fold_1/, etc.
+
+    Fold models can later be ensembled for the best possible inference.
+
+    \b
+    Examples:
+        lung-screener train-kfold -k 5
+        lung-screener train-kfold -k 5 --dataset luna16 ./data/luna16 --dataset luna25 ./data/luna25
+    """
+    from .train import train_kfold
+
+    config = ctx.obj["config"]
+    if epochs:
+        config.setdefault("training", {})["epochs"] = epochs
+    if batch_size:
+        config.setdefault("training", {})["batch_size"] = batch_size
+    if lr:
+        config.setdefault("training", {})["learning_rate"] = lr
+    if dataset:
+        config.setdefault("data", {})["datasets"] = [
+            {"type": kind, "dataset_dir": path} for kind, path in dataset
+        ]
+
+    summary = train_kfold(config, n_folds=folds, checkpoint_dir=checkpoint_dir)
+
+    click.echo("")
+    click.echo(f"K-Fold Training Complete ({summary['n_folds']} folds)")
+    click.echo(f"  Mean AUC: {summary['mean_auc']:.4f} ± {summary['std_auc']:.4f}")
+    click.echo(f"  Range:    {summary['min_auc']:.4f} - {summary['max_auc']:.4f}")
+    click.echo(f"\nFold checkpoints saved under {checkpoint_dir}/fold_*/best.pth")
+    click.echo("Use 'lung-screener ensemble-predict' to run ensemble inference.")
+
+
+@main.command(name="evaluate-kfold")
+@click.option("--folds", "-k", type=int, default=5, help="Number of folds")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Root checkpoint directory")
+@click.option("--output", "-o", type=click.Path(), help="Output JSON results file")
+@click.pass_context
+def evaluate_kfold_cmd(ctx, folds, checkpoint_dir, output):
+    """Evaluate all k-fold models and aggregate metrics.
+
+    \b
+    Example:
+        lung-screener evaluate-kfold -k 5 --checkpoint-dir ./checkpoints
+    """
+    from .evaluate import evaluate_kfold
+
+    config = ctx.obj["config"]
+    results = evaluate_kfold(config, checkpoint_dir, n_folds=folds, output_path=output)
+
+    agg = results.get("aggregated_metrics", {})
+    click.echo(f"\nK-Fold Evaluation ({results.get('n_folds', 0)} folds)")
+    click.echo(f"  AUC:         {agg.get('auc_roc_mean', 0):.4f} ± {agg.get('auc_roc_std', 0):.4f}")
+    click.echo(f"  Sensitivity: {agg.get('sensitivity_mean', 0):.4f} ± {agg.get('sensitivity_std', 0):.4f}")
+    click.echo(f"  Specificity: {agg.get('specificity_mean', 0):.4f} ± {agg.get('specificity_std', 0):.4f}")
+    click.echo(f"  F1:          {agg.get('f1_score_mean', 0):.4f} ± {agg.get('f1_score_std', 0):.4f}")
+
+
+@main.command(name="ensemble-predict")
+@click.argument("input_path", type=click.Path(exists=True))
+@click.option("--models", "-m", type=click.Path(exists=True), multiple=True, required=True,
+              help="Model checkpoint paths (repeat for each model)")
+@click.option("--output", "-o", type=click.Path(), help="Output JSON file")
+@click.option("--format", "output_format", type=click.Choice(["json", "text", "report"]), default="text")
+@click.pass_context
+def ensemble_predict(ctx, input_path, models, output, output_format):
+    """Run ensemble inference with multiple models.
+
+    Averages predictions from multiple checkpoints (e.g. k-fold models)
+    for more robust and accurate detection.
+
+    \b
+    Examples:
+        lung-screener ensemble-predict /scan -m fold_0/best.pth -m fold_1/best.pth -m fold_2/best.pth
+        lung-screener ensemble-predict /scan -m best.pth -m swa_best.pth
+    """
+    from .inference import EnsembleDetector
+    from .preprocessing import load_dicom_series, load_mhd
+
+    config = ctx.obj["config"]
+    input_path = Path(input_path)
+
+    detector = EnsembleDetector(config, model_paths=list(models))
+
+    if input_path.suffix in (".mhd", ".mha"):
+        image = load_mhd(input_path)
+        series_uid = input_path.stem
+    elif input_path.is_dir():
+        image = load_dicom_series(input_path)
+        series_uid = input_path.name
+    else:
+        click.echo(f"Unsupported input: {input_path}", err=True)
+        sys.exit(1)
+
+    result = detector.predict_scan(image, series_uid=series_uid)
+
+    if output_format == "json":
+        result_dict = result.to_dict()
+        if output:
+            with open(output, "w") as f:
+                json.dump(result_dict, f, indent=2)
+            click.echo(f"Results written to {output}")
+        else:
+            click.echo(json.dumps(result_dict, indent=2))
+    elif output_format == "report":
+        report_text = result.dictation()
+        if output:
+            with open(output, "w") as f:
+                f.write(report_text)
+            click.echo(f"Report written to {output}")
+        else:
+            click.echo(report_text)
+    else:
+        click.echo(result.summary())
+
+
 @main.command()
 @click.argument("input_path", type=click.Path(exists=True))
 @click.option("--model", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
