@@ -37,7 +37,7 @@ training:
   loss:
     type: "focal"
     focal_gamma: 2.0
-    focal_alpha: null
+    focal_alpha: 0.75
     label_smoothing: 0.05   # Prevents overconfident predictions
 
   # Aggressive augmentation for a larger, more diverse training set

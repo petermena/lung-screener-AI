@@ -215,6 +215,16 @@ class Trainer:
         logger.info(f"Training samples: {len(train_dataset)}")
         logger.info(f"Validation samples: {len(val_dataset)}")
 
+        # Log class distribution so imbalance is visible
+        for name, ds in [("Train", train_dataset), ("Val", val_dataset)]:
+            all_samples = []
+            for child in ds.datasets:
+                all_samples.extend(child.samples)
+            n_pos = sum(1 for s in all_samples if s["label"] == 1)
+            n_neg = len(all_samples) - n_pos
+            ratio = n_neg / n_pos if n_pos > 0 else float("inf")
+            logger.info(f"  {name} distribution: {n_pos} pos / {n_neg} neg (1:{ratio:.1f})")
+
         # Pre-populate disk cache so DataLoader workers find fast .npy
         # files instead of having to load and resample raw .mhd volumes
         # (~30-60s each).  This is a one-time cost; subsequent runs are
