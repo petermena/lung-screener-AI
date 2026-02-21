@@ -32,13 +32,10 @@ training:
   num_workers: 2
   pos_neg_ratio: 0.5
 
-  # Focal Loss: focuses training on hard-to-classify candidates,
-  # especially borderline nodules that standard CE treats equally.
+  # Start with plain CE to verify convergence, switch to focal loss later.
   loss:
-    type: "focal"
-    focal_gamma: 2.0
-    focal_alpha: 0.5        # Balanced — oversampling (pos_neg_ratio=0.5) already handles class weight
-    label_smoothing: 0.0    # Disabled — conflicts with focal loss
+    type: "cross_entropy"
+    label_smoothing: 0.0
 
   # Moderate augmentation — converge first, add aggressive augs later
   augmentation:
