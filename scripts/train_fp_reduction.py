@@ -947,6 +947,16 @@ def main():
     # ------------------------------------------------------------------
     logger.info("\n[Step 4/4] Evaluating combined two-stage pipeline...")
 
+    # Reload first-stage model (was freed after scoring to save GPU memory)
+    first_stage_model = build_model(config).to(device)
+    ckpt = torch.load(first_stage_path, map_location=device, weights_only=False)
+    if "model_state_dict" in ckpt:
+        first_stage_model.load_state_dict(ckpt["model_state_dict"])
+    else:
+        first_stage_model.load_state_dict(ckpt)
+    first_stage_model.eval()
+    del ckpt
+
     # Load best FP reduction model
     fp_model = FPReductionNet(in_channels=1, base_filters=32).to(device)
     fp_ckpt = torch.load(best_ckpt_path, map_location=device, weights_only=False)
