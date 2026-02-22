@@ -395,6 +395,33 @@ class Trainer:
         auc = _trapezoid(tp_rate, fp_rate)
         return float(auc)
 
+    @torch.no_grad()
+    def _update_swa_bn(self, train_loader: DataLoader) -> None:
+        """Update SWA model BatchNorm stats with mixed-precision forward passes."""
+        momenta = {}
+        for module in self.swa_model.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.running_mean = torch.zeros_like(module.running_mean)
+                module.running_var = torch.zeros_like(module.running_var)
+                momenta[module] = module.momentum
+
+        if not momenta:
+            return
+
+        was_training = self.swa_model.training
+        self.swa_model.train()
+        for bn_module in momenta.keys():
+            bn_module.momentum = None
+
+        for batch in tqdm(train_loader, desc="SWA BN update", leave=False):
+            x = batch["patch"].to(self.device)
+            with autocast("cuda", enabled=torch.cuda.is_available()):
+                self.swa_model(x)
+
+        for bn_module in momenta.keys():
+            bn_module.momentum = momenta[bn_module]
+        self.swa_model.train(was_training)
+
     def save_checkpoint(
         self,
         epoch: int,
@@ -509,11 +536,7 @@ class Trainer:
             if self.swa_enabled and epoch >= self.swa_start_epoch and self.swa_model is not None:
                 self.swa_model.update_parameters(self.model)
                 # BN update requires a forward pass over training data
-                # update_bn expects the loader to yield tensors, not dicts
-                def _swa_loader():
-                    for batch in train_loader:
-                        yield batch["patch"]
-                torch.optim.swa_utils.update_bn(_swa_loader(), self.swa_model, device=self.device)
+                self._update_swa_bn(train_loader)
                 # Validate with SWA-averaged model
                 original_model = self.model
                 self.model = self.swa_model
@@ -571,7 +594,7 @@ class Trainer:
         # Save final SWA model if active
         if self.swa_enabled and self.swa_model is not None:
             logger.info("Saving SWA-averaged model as swa_best.pth")
-            torch.optim.swa_utils.update_bn(train_loader, self.swa_model, device=self.device)
+            self._update_swa_bn(train_loader)
             swa_checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": self.swa_model.module.state_dict(),
