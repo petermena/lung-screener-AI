@@ -841,6 +841,8 @@ def gradcam(ctx, input_path, model, output, view, num_slices, alpha, max_finding
         lung-screener gradcam scan.mhd -m best.pth --view three-plane
         lung-screener gradcam /dicom/dir -m best.pth -o ./maps --alpha 0.5
     """
+    import torch
+
     from .gradcam import GradCAM3D, load_model_for_gradcam, render_slices, render_three_plane
     from .preprocessing import CTPreprocessor, extract_patch, load_dicom_series, load_mhd
 

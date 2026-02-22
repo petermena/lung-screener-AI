@@ -4,9 +4,9 @@
 # Uses SE-ResNeXt3D architecture with all advanced training techniques enabled.
 #
 # Usage:
-#   lung-screener train -c config/best_model.yaml
-#   lung-screener train-kfold -k 5 -c config/best_model.yaml
-#   lung-screener evaluate -m checkpoints/best.pth -c config/best_model.yaml
+#   lung-screener -c config/best_model.yaml train
+#   lung-screener -c config/best_model.yaml train-kfold -k 5
+#   lung-screener -c config/best_model.yaml evaluate -m checkpoints/best.pth
 
 model:
   # SE-ResNeXt3D: state-of-the-art architecture combining grouped
