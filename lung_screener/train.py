@@ -72,6 +72,8 @@ class FocalLoss(nn.Module):
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         num_classes = logits.shape[1]
+        # Ensure float32 for numerical stability under mixed precision
+        logits = logits.float()
         probs = torch.softmax(logits, dim=1)
 
         # One-hot with optional label smoothing
@@ -281,7 +283,8 @@ class Trainer:
 
             with autocast("cuda", enabled=torch.cuda.is_available()):
                 output = self.model(patches)
-                loss = self.criterion(output["logits"], labels)
+                # Compute loss in float32 to avoid fp16 overflow in softmax/log
+                loss = self.criterion(output["logits"].float(), labels)
 
             # Skip batch if loss is NaN to avoid corrupting model weights
             if torch.isnan(loss):
@@ -336,7 +339,8 @@ class Trainer:
 
             with autocast("cuda", enabled=torch.cuda.is_available()):
                 output = self.model(patches)
-                loss = self.criterion(output["logits"], labels)
+                # Compute loss in float32 to avoid fp16 overflow in softmax/log
+                loss = self.criterion(output["logits"].float(), labels)
 
             # Skip entire batch if logits contain NaN (e.g. fp16 overflow)
             if torch.isnan(output["logits"]).any():

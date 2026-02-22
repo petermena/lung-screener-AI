@@ -249,16 +249,19 @@ class NoduleResNet3D(nn.Module):
 
         features = self.gap(x).flatten(1)
 
+        # Cast to float32 before classifier to prevent fp16 logit overflow
+        features_f32 = features.float()
+
         result = {
-            "logits": self.classifier(features),
+            "logits": self.classifier(features_f32),
             "features": features,
         }
 
         if self.predict_malignancy:
-            result["malignancy"] = self.malignancy_head(features)
+            result["malignancy"] = self.malignancy_head(features_f32)
 
         if self.predict_nodule_type:
-            result["nodule_type_logits"] = self.nodule_type_head(features)
+            result["nodule_type_logits"] = self.nodule_type_head(features_f32)
 
         return result
 
@@ -378,16 +381,19 @@ class NoduleDenseNet3D(nn.Module):
         x = F.relu(self.final_bn(x))
         features = self.gap(x).flatten(1)
 
+        # Cast to float32 before classifier to prevent fp16 logit overflow
+        features_f32 = features.float()
+
         result = {
-            "logits": self.classifier(features),
+            "logits": self.classifier(features_f32),
             "features": features,
         }
 
         if self.predict_malignancy:
-            result["malignancy"] = self.malignancy_head(features)
+            result["malignancy"] = self.malignancy_head(features_f32)
 
         if self.predict_nodule_type:
-            result["nodule_type_logits"] = self.nodule_type_head(features)
+            result["nodule_type_logits"] = self.nodule_type_head(features_f32)
 
         return result
 
@@ -548,16 +554,19 @@ class NoduleSEResNeXt3D(nn.Module):
         p4 = self.pool4(f4).flatten(1)
         features = torch.cat([p2, p3, p4], dim=1)
 
+        # Cast to float32 before classifier to prevent fp16 logit overflow
+        features_f32 = features.float()
+
         result = {
-            "logits": self.classifier(features),
+            "logits": self.classifier(features_f32),
             "features": features,
         }
 
         if self.predict_malignancy:
-            result["malignancy"] = self.malignancy_head(features)
+            result["malignancy"] = self.malignancy_head(features_f32)
 
         if self.predict_nodule_type:
-            result["nodule_type_logits"] = self.nodule_type_head(features)
+            result["nodule_type_logits"] = self.nodule_type_head(features_f32)
 
         return result
 
