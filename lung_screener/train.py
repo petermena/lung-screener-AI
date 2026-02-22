@@ -311,7 +311,7 @@ class Trainer:
 
         metrics = {
             "loss": total_loss / total,
-            "accuracy": correct / total,
+            "accuracy": correct / total if total > 0 else 0.0,
         }
 
         # Compute AUC
@@ -371,7 +371,7 @@ class Trainer:
 
         metrics = {
             "loss": total_loss / loss_count if loss_count > 0 else float("nan"),
-            "accuracy": correct / total,
+            "accuracy": correct / total if total > 0 else 0.0,
             "precision": precision,
             "recall": recall,
             "f1": f1,
