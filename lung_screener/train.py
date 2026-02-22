@@ -509,7 +509,11 @@ class Trainer:
             if self.swa_enabled and epoch >= self.swa_start_epoch and self.swa_model is not None:
                 self.swa_model.update_parameters(self.model)
                 # BN update requires a forward pass over training data
-                torch.optim.swa_utils.update_bn(train_loader, self.swa_model, device=self.device)
+                # update_bn expects the loader to yield tensors, not dicts
+                def _swa_loader():
+                    for batch in train_loader:
+                        yield batch["patch"]
+                torch.optim.swa_utils.update_bn(_swa_loader(), self.swa_model, device=self.device)
                 # Validate with SWA-averaged model
                 original_model = self.model
                 self.model = self.swa_model
