@@ -283,6 +283,12 @@ class Trainer:
                 output = self.model(patches)
                 loss = self.criterion(output["logits"], labels)
 
+            # Skip batch if loss is NaN to avoid corrupting model weights
+            if torch.isnan(loss):
+                logger.warning("  NaN training loss — skipping batch")
+                self.optimizer.zero_grad()
+                continue
+
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -331,6 +337,11 @@ class Trainer:
             with autocast("cuda", enabled=torch.cuda.is_available()):
                 output = self.model(patches)
                 loss = self.criterion(output["logits"], labels)
+
+            # Skip entire batch if logits contain NaN (e.g. fp16 overflow)
+            if torch.isnan(output["logits"]).any():
+                logger.warning("  NaN detected in validation logits — skipping batch")
+                continue
 
             batch_loss = loss.item()
             if np.isfinite(batch_loss):
@@ -415,8 +426,9 @@ class Trainer:
 
         for batch in tqdm(train_loader, desc="SWA BN update", leave=False):
             x = batch["patch"].to(self.device)
-            with autocast("cuda", enabled=torch.cuda.is_available()):
-                self.swa_model(x)
+            # Force fp32 — fp16 autocast can overflow BN running stats in
+            # early SWA epochs when averaged weights are still unstable.
+            self.swa_model(x)
 
         for bn_module in momenta.keys():
             bn_module.momentum = momenta[bn_module]
@@ -510,6 +522,7 @@ class Trainer:
                 logger.info(f"Resumed from epoch {start_epoch + 1}")
 
         logger.info(f"Starting training for {self.epochs} epochs")
+        nan_streak = 0
 
         for epoch in range(start_epoch, self.epochs):
             logger.info(f"Epoch {epoch + 1}/{self.epochs}")
@@ -552,6 +565,22 @@ class Trainer:
                 f"Sens: {val_metrics['sensitivity']:.4f}, "
                 f"Spec: {val_metrics['specificity']:.4f}"
             )
+
+            # Detect NaN validation loss — halt if it persists
+            if np.isnan(val_metrics["loss"]):
+                nan_streak += 1
+                logger.warning(
+                    f"  Validation loss is NaN ({nan_streak} consecutive epoch(s))"
+                )
+                if nan_streak >= 3:
+                    logger.error(
+                        f"Halting: validation loss NaN for {nan_streak} consecutive "
+                        f"epochs. Resume from best checkpoint: "
+                        f"{self.checkpoint_dir / 'best.pth'}"
+                    )
+                    break
+            else:
+                nan_streak = 0
 
             # Step scheduler — switch to SWA scheduler after swa_start_epoch
             if self.swa_enabled and epoch >= self.swa_start_epoch and self.swa_scheduler is not None:
