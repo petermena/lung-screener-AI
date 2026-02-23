@@ -298,6 +298,26 @@ class Trainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
+            # Verify model weights are still valid after the optimizer step.
+            # GradScaler catches most inf/NaN gradients, but edge cases
+            # (e.g. NaN from weight update arithmetic) can slip through and
+            # permanently corrupt the model.
+            if any(torch.isnan(p).any() for p in self.model.parameters()):
+                best_path = self.checkpoint_dir / "best.pth"
+                if best_path.exists():
+                    logger.error(
+                        "  NaN detected in model parameters after optimizer step "
+                        "— reloading best checkpoint"
+                    )
+                    self.load_checkpoint(best_path)
+                    return {"loss": float("nan"), "accuracy": 0.0, "auc": 0.0}
+                else:
+                    logger.error(
+                        "  NaN detected in model parameters and no best "
+                        "checkpoint available — aborting epoch"
+                    )
+                    return {"loss": float("nan"), "accuracy": 0.0, "auc": 0.0}
+
             total_loss += loss.item() * patches.size(0)
             probs = torch.softmax(output["logits"], dim=1)[:, 1]
             preds = (probs >= self.eval_threshold).long()
@@ -412,30 +432,63 @@ class Trainer:
 
     @torch.no_grad()
     def _update_swa_bn(self, train_loader: DataLoader) -> None:
-        """Update SWA model BatchNorm stats with mixed-precision forward passes."""
-        momenta = {}
-        for module in self.swa_model.modules():
+        """Update SWA model BatchNorm stats with fp32 forward passes.
+
+        Includes NaN protection: if a forward pass produces NaN in any
+        BatchNorm running stats, the batch is skipped and the stats are
+        restored from the previous good state.
+        """
+        bn_modules = {}
+        for name, module in self.swa_model.named_modules():
             if isinstance(module, nn.modules.batchnorm._BatchNorm):
                 module.running_mean = torch.zeros_like(module.running_mean)
                 module.running_var = torch.zeros_like(module.running_var)
-                momenta[module] = module.momentum
+                bn_modules[name] = module
 
-        if not momenta:
+        if not bn_modules:
             return
 
+        # Save original momentum and switch to cumulative moving average
+        momenta = {name: m.momentum for name, m in bn_modules.items()}
         was_training = self.swa_model.training
         self.swa_model.train()
-        for bn_module in momenta.keys():
-            bn_module.momentum = None
+        for m in bn_modules.values():
+            m.momentum = None
 
+        nan_batches = 0
         for batch in tqdm(train_loader, desc="SWA BN update", leave=False):
+            # Snapshot BN stats before forward pass so we can roll back
+            bn_snapshots = {
+                name: (m.running_mean.clone(), m.running_var.clone(),
+                       m.num_batches_tracked.clone())
+                for name, m in bn_modules.items()
+            }
+
             x = batch["patch"].to(self.device)
-            # Force fp32 — fp16 autocast can overflow BN running stats in
-            # early SWA epochs when averaged weights are still unstable.
             self.swa_model(x)
 
-        for bn_module in momenta.keys():
-            bn_module.momentum = momenta[bn_module]
+            # Check BN stats for NaN — restore snapshot if corrupted
+            corrupted = False
+            for name, m in bn_modules.items():
+                if torch.isnan(m.running_mean).any() or torch.isnan(m.running_var).any():
+                    corrupted = True
+                    break
+
+            if corrupted:
+                nan_batches += 1
+                for name, m in bn_modules.items():
+                    prev_mean, prev_var, prev_count = bn_snapshots[name]
+                    m.running_mean.copy_(prev_mean)
+                    m.running_var.copy_(prev_var)
+                    m.num_batches_tracked.copy_(prev_count)
+                if nan_batches <= 3:
+                    logger.warning("  NaN in BN stats during SWA update — skipping batch")
+
+        if nan_batches > 0:
+            logger.warning(f"  SWA BN update: skipped {nan_batches} NaN batch(es)")
+
+        for name, m in bn_modules.items():
+            m.momentum = momenta[name]
         self.swa_model.train(was_training)
 
     def save_checkpoint(
@@ -551,7 +604,18 @@ class Trainer:
 
             # Validate — use SWA model for eval when active
             if self.swa_enabled and epoch >= self.swa_start_epoch and self.swa_model is not None:
-                self.swa_model.update_parameters(self.model)
+                # Only update SWA model if base model weights are clean.
+                # Averaging NaN weights into the SWA model would corrupt it
+                # permanently, making all subsequent validation NaN.
+                base_has_nan = any(
+                    torch.isnan(p).any() for p in self.model.parameters()
+                )
+                if base_has_nan:
+                    logger.warning(
+                        "  Skipping SWA update — base model contains NaN weights"
+                    )
+                else:
+                    self.swa_model.update_parameters(self.model)
                 # BN update requires a forward pass over training data
                 self._update_swa_bn(train_loader)
                 # Validate with SWA-averaged model
@@ -624,8 +688,9 @@ class Trainer:
                     )
                     break
 
-        # Save final SWA model if active
-        if self.swa_enabled and self.swa_model is not None:
+        # Save final SWA model if active — but skip if training halted
+        # due to NaN, as the SWA model is likely corrupted.
+        if self.swa_enabled and self.swa_model is not None and nan_streak < 3:
             logger.info("Saving SWA-averaged model as swa_best.pth")
             self._update_swa_bn(train_loader)
             swa_checkpoint = {
@@ -636,6 +701,12 @@ class Trainer:
                 "swa": True,
             }
             torch.save(swa_checkpoint, self.checkpoint_dir / "swa_best.pth")
+        elif self.swa_enabled and nan_streak >= 3:
+            logger.warning(
+                "Skipping SWA model save — training halted due to NaN. "
+                "Resume from best checkpoint: %s",
+                self.checkpoint_dir / "best.pth",
+            )
 
         # Generate final dashboard
         dashboard_path = save_dashboard(
