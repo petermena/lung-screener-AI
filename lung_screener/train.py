@@ -126,7 +126,6 @@ class Trainer:
 
         # Checkpoint safeguards
         self.checkpoint_save_every = train_config.get("checkpoint_save_every", 10)
-        self._acquire_checkpoint_lock()
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -200,6 +199,9 @@ class Trainer:
             self.swa_model = AveragedModel(self.model)
             self.swa_scheduler = SWALR(self.optimizer, swa_lr=self.swa_lr)
             logger.info(f"SWA enabled: starts epoch {self.swa_start_epoch}, lr={self.swa_lr}")
+
+        # Acquire checkpoint lock (must be after all config attrs are set)
+        self._acquire_checkpoint_lock()
 
         # Metrics logger for dashboard
         self.metrics_logger = MetricsLogger(self.checkpoint_dir)
