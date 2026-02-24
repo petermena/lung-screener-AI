@@ -15,6 +15,8 @@ Handles the full training loop with:
 import copy
 import json
 import logging
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -121,6 +123,10 @@ class Trainer:
             "eval_threshold",
             config.get("inference", {}).get("threshold", 0.5),
         )
+
+        # Checkpoint safeguards
+        self.checkpoint_save_every = train_config.get("checkpoint_save_every", 10)
+        self._acquire_checkpoint_lock()
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -524,6 +530,79 @@ class Trainer:
 
         return True
 
+    def _acquire_checkpoint_lock(self):
+        """Write a lock file to prevent other runs from using this directory.
+
+        If a lock file already exists from a *different* config, the trainer
+        refuses to start — this catches the exact scenario that destroyed
+        the epoch-76 checkpoint.
+        """
+        lock_path = self.checkpoint_dir / ".train_lock.json"
+        run_signature = {
+            "epochs": self.epochs,
+            "architecture": self.config.get("model", {}).get("architecture"),
+            "swa_enabled": self.swa_enabled,
+            "lr": self.lr,
+            "started_at": datetime.now().isoformat(),
+            "pid": __import__("os").getpid(),
+        }
+
+        if lock_path.exists():
+            try:
+                existing = json.loads(lock_path.read_text())
+                # Same config signature is OK (resumed run). Different config
+                # means a rogue run is about to overwrite production checkpoints.
+                existing_sig = (
+                    existing.get("epochs"),
+                    existing.get("architecture"),
+                    existing.get("swa_enabled"),
+                )
+                new_sig = (
+                    run_signature["epochs"],
+                    run_signature["architecture"],
+                    run_signature["swa_enabled"],
+                )
+                if existing_sig != new_sig:
+                    logger.error(
+                        "CHECKPOINT DIRECTORY CONFLICT: %s is locked by a "
+                        "different training config (started %s, epochs=%s, "
+                        "arch=%s). Use --checkpoint-dir to pick a separate "
+                        "directory, or delete %s to override.",
+                        self.checkpoint_dir,
+                        existing.get("started_at", "?"),
+                        existing.get("epochs", "?"),
+                        existing.get("architecture", "?"),
+                        lock_path,
+                    )
+                    raise RuntimeError(
+                        f"Checkpoint directory {self.checkpoint_dir} is locked "
+                        f"by a different training configuration. Use a separate "
+                        f"--checkpoint-dir to avoid overwriting existing checkpoints."
+                    )
+            except json.JSONDecodeError:
+                pass  # Corrupt lock file — overwrite it
+
+        lock_path.write_text(json.dumps(run_signature, indent=2))
+
+    def _verify_checkpoint(self, path: Path, expected_epoch: int) -> bool:
+        """Reload a saved checkpoint and verify it wasn't corrupted on disk."""
+        try:
+            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            if ckpt.get("epoch") != expected_epoch:
+                logger.error(
+                    "Checkpoint verification FAILED for %s: expected epoch %d, "
+                    "got %d",
+                    path, expected_epoch, ckpt.get("epoch"),
+                )
+                return False
+            if "model_state_dict" not in ckpt:
+                logger.error("Checkpoint verification FAILED: no model_state_dict")
+                return False
+            return True
+        except Exception as e:
+            logger.error("Checkpoint verification FAILED for %s: %s", path, e)
+            return False
+
     def save_checkpoint(
         self,
         epoch: int,
@@ -531,7 +610,19 @@ class Trainer:
         is_best: bool = False,
         phase: str = "complete",
     ):
-        """Save model checkpoint.
+        """Save model checkpoint with safeguards.
+
+        Safeguards added after the epoch-76 (AUC 0.982) checkpoint was
+        lost to an accidental overwrite:
+
+        1. **Numbered epoch checkpoints** — saves ``epoch_{N}.pth`` every
+           ``checkpoint_save_every`` epochs so there is always a fallback.
+        2. **Best checkpoint backup** — before overwriting ``best.pth``,
+           copies the existing one to ``best_backup_epoch{N}_auc{AUC}.pth``.
+        3. **Write-then-rename** — writes to a temp file first, then renames
+           atomically to avoid partial-write corruption.
+        4. **Post-save verification** — reloads and sanity-checks the
+           checkpoint after writing.
 
         Args:
             epoch: Current epoch number.
@@ -552,12 +643,43 @@ class Trainer:
             "epochs_without_improvement": self.epochs_without_improvement,
         }
 
-        # Save latest
-        torch.save(checkpoint, self.checkpoint_dir / "latest.pth")
+        # --- Write latest.pth via temp file for atomic save ---
+        latest_path = self.checkpoint_dir / "latest.pth"
+        tmp_path = self.checkpoint_dir / "latest.pth.tmp"
+        torch.save(checkpoint, tmp_path)
+        tmp_path.rename(latest_path)
+
+        # --- Numbered epoch checkpoint (every N epochs) ---
+        if phase == "complete" and (epoch + 1) % self.checkpoint_save_every == 0:
+            epoch_path = self.checkpoint_dir / f"epoch_{epoch:04d}.pth"
+            shutil.copy2(latest_path, epoch_path)
+            logger.info(f"  Saved epoch checkpoint: {epoch_path.name}")
 
         if is_best:
-            torch.save(checkpoint, self.checkpoint_dir / "best.pth")
+            best_path = self.checkpoint_dir / "best.pth"
+
+            # Back up previous best before overwriting
+            if best_path.exists():
+                try:
+                    prev = torch.load(best_path, map_location="cpu", weights_only=False)
+                    prev_epoch = prev.get("epoch", "?")
+                    prev_auc = prev.get("best_val_auc", prev.get("metrics", {}).get("auc", 0))
+                    backup_name = f"best_backup_epoch{prev_epoch}_auc{prev_auc:.4f}.pth"
+                    backup_path = self.checkpoint_dir / backup_name
+                    shutil.copy2(best_path, backup_path)
+                    logger.info(f"  Backed up previous best → {backup_name}")
+                except Exception as e:
+                    logger.warning(f"  Could not back up previous best.pth: {e}")
+
+            # Atomic write for best.pth
+            tmp_best = self.checkpoint_dir / "best.pth.tmp"
+            torch.save(checkpoint, tmp_best)
+            tmp_best.rename(best_path)
             logger.info(f"  Saved new best model (AUC: {metrics['auc']:.4f})")
+
+            # Verify the written checkpoint
+            if not self._verify_checkpoint(best_path, epoch):
+                logger.error("  CRITICAL: best.pth failed verification after save!")
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, str]:
         """Load a checkpoint and return (epoch number, phase).
@@ -747,7 +869,10 @@ class Trainer:
                     "best_val_auc": self.best_val_auc,
                     "swa": True,
                 }
-                torch.save(swa_checkpoint, self.checkpoint_dir / "swa_best.pth")
+                swa_tmp = self.checkpoint_dir / "swa_best.pth.tmp"
+                swa_path = self.checkpoint_dir / "swa_best.pth"
+                torch.save(swa_checkpoint, swa_tmp)
+                swa_tmp.rename(swa_path)
         elif self.swa_enabled and nan_streak >= 3:
             logger.warning(
                 "Skipping SWA model save — training halted due to NaN. "

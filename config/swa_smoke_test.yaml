@@ -1,6 +1,8 @@
 # SWA Smoke Test — triggers SWA almost immediately to verify
 # it doesn't crash before committing to a full training run.
-# IMPORTANT: Use a separate checkpoint dir to avoid overwriting real checkpoints!
+# Uses its own checkpoint dir (./checkpoints/swa_test) to avoid overwriting
+# production checkpoints. The checkpoint lock will also block accidental
+# runs into the production directory.
 # Usage: lung-screener -c config/swa_smoke_test.yaml train --checkpoint-dir ./checkpoints/swa_test
 
 model:

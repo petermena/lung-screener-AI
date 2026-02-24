@@ -82,6 +82,9 @@ training:
     enabled: false
     start_epoch: 75       # Switch to SWA at this epoch
     lr: 0.00005           # SWA learning rate
+  # Save a numbered epoch checkpoint every N epochs (e.g. epoch_0010.pth).
+  # These survive even if best.pth or latest.pth are overwritten.
+  checkpoint_save_every: 10
   # Early stopping patience (epochs)
   early_stopping_patience: 15
   # Learning rate scheduler
