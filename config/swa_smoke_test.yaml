@@ -1,6 +1,7 @@
 # SWA Smoke Test — triggers SWA almost immediately to verify
 # it doesn't crash before committing to a full training run.
-# Usage: lung-screener -c config/swa_smoke_test.yaml train
+# IMPORTANT: Use a separate checkpoint dir to avoid overwriting real checkpoints!
+# Usage: lung-screener -c config/swa_smoke_test.yaml train --checkpoint-dir ./checkpoints/swa_test
 
 model:
   architecture: "se_resnext3d"
