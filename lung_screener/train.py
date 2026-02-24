@@ -28,7 +28,7 @@ from torch.optim.swa_utils import AveragedModel, SWALR
 
 # NumPy 2.0 renamed np.trapz → np.trapezoid
 _trapezoid = getattr(np, "trapezoid", None) or np.trapz
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from tqdm import tqdm
 
 from .dataset import CombinedLungDataset, LUNA16Dataset
@@ -234,7 +234,22 @@ class Trainer:
         for name, ds in [("Train", train_dataset), ("Val", val_dataset)]:
             all_samples = []
             for child in ds.datasets:
-                all_samples.extend(child.samples)
+                # Unwrap Subset (created by max_val_candidates cap)
+                inner = child
+                indices = None
+                if isinstance(inner, Subset):
+                    indices = inner.indices
+                    inner = inner.dataset
+                # ConcatDataset wrapping: flatten one more level
+                if isinstance(inner, ConcatDataset):
+                    samples = []
+                    for grandchild in inner.datasets:
+                        samples.extend(grandchild.samples)
+                else:
+                    samples = inner.samples
+                if indices is not None:
+                    samples = [samples[i] for i in indices]
+                all_samples.extend(samples)
             n_pos = sum(1 for s in all_samples if s["label"] == 1)
             n_neg = len(all_samples) - n_pos
             ratio = n_neg / n_pos if n_pos > 0 else float("inf")
