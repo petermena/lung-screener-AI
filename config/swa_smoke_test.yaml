@@ -1,0 +1,72 @@
+# SWA Smoke Test — triggers SWA almost immediately to verify
+# it doesn't crash before committing to a full training run.
+# Usage: lung-screener -c config/swa_smoke_test.yaml train
+
+model:
+  architecture: "se_resnext3d"
+  in_channels: 1
+  num_classes: 2
+  patch_size: [48, 48, 48]
+  predict_nodule_type: false
+  base_filters: 64
+  cardinality: 32
+  bottleneck_width: 4
+  se_reduction: 16
+  drop_path_rate: 0.2
+
+training:
+  batch_size: 16
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  epochs: 5              # Just 5 epochs — enough to exercise SWA
+  num_workers: 2
+  pos_neg_ratio: 0.5
+
+  loss:
+    type: "cross_entropy"
+    label_smoothing: 0.0
+
+  augmentation:
+    rotation: true
+    flip: true
+    scale_range: [0.9, 1.1]
+    noise_std: 0.01
+    elastic_deformation: false
+    intensity_shift: 0.05
+    intensity_scale: 0.05
+    mixup_alpha: 0.0
+    cutout: false
+
+  swa:
+    enabled: true
+    start_epoch: 2        # Kick in SWA at epoch 2 (immediately)
+    lr: 0.00005
+
+  early_stopping_patience: 100  # Don't early-stop during smoke test
+
+  scheduler:
+    type: "cosine_warm_restarts"
+    warmup_epochs: 1
+    t_0: 25
+    t_mult: 2
+
+inference:
+  threshold: 0.15
+  nms_distance_mm: 10.0
+  batch_size: 64
+  validate_input: true
+  tta:
+    enabled: true
+    n_augments: 8
+
+data:
+  dataset_dir: "./data/luna16"
+  cache_dir: "./data/cache"
+  val_split: 0.2
+  max_val_candidates: 5000
+  training_dir: "./data/training"
+  datasets:
+    - type: luna16
+      dataset_dir: "./data/luna16"
+    - type: luna25
+      dataset_dir: "./data/luna25"
