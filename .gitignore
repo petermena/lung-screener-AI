@@ -23,6 +23,7 @@ data/
 checkpoints/*
 !checkpoints/eval_results.json
 !checkpoints/metrics.json
+!checkpoints/dashboard.html
 *.pth
 *.pt
 *.onnx

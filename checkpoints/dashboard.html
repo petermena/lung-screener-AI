@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lung Screener AI - Training Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+               background: #1a1a2e; color: #eee; padding: 20px; }
+        h1 { text-align: center; margin-bottom: 10px; color: #00d4ff; }
+        .subtitle { text-align: center; color: #888; margin-bottom: 30px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+                gap: 20px; max-width: 1400px; margin: 0 auto; }
+        .card { background: #16213e; border-radius: 12px; padding: 20px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .card h2 { font-size: 16px; color: #00d4ff; margin-bottom: 15px; }
+        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;
+                 max-width: 1400px; margin: 0 auto 20px; }
+        .stat { background: #16213e; border-radius: 12px; padding: 15px; text-align: center; }
+        .stat .value { font-size: 28px; font-weight: bold; color: #00d4ff; }
+        .stat .label { font-size: 12px; color: #888; margin-top: 5px; }
+        canvas { max-height: 300px; }
+        .no-data { text-align: center; color: #666; padding: 40px;
+                   font-size: 18px; }
+    </style>
+</head>
+<body>
+    <h1>Lung Screener AI</h1>
+    <p class="subtitle">Training Metrics Dashboard</p>
+
+    <div class="stats" id="statsGrid"></div>
+    <div class="grid">
+        <div class="card"><h2>Loss Curves</h2><canvas id="lossChart"></canvas></div>
+        <div class="card"><h2>AUC-ROC</h2><canvas id="aucChart"></canvas></div>
+        <div class="card"><h2>Sensitivity &amp; Specificity</h2><canvas id="sensSpecChart"></canvas></div>
+        <div class="card"><h2>Precision / Recall / F1</h2><canvas id="prfChart"></canvas></div>
+        <div class="card"><h2>Learning Rate Schedule</h2><canvas id="lrChart"></canvas></div>
+        <div class="card"><h2>Accuracy</h2><canvas id="accChart"></canvas></div>
+    </div>
+
+    <script>
+    const metrics = {"epoch": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0], "train_loss": [0.814724, 0.826804, 0.581579, 0.765121, 0.711844, 0.626454, 0.450877, 0.641118, 1.000455, 0.95195, 1.426562], "train_accuracy": [0.5, 0.4688, 0.5938, 0.4688, 0.5, 0.4375, 0.5938, 0.5, 0.4688, 0.4688, 0.5], "train_auc": [0.5294, 0.4325, 0.6367, 0.4609, 0.4444, 0.6468, 0.6667, 0.5273, 0.3882, 0.3882, 0.6445], "val_loss": [0.693835, 0.708717, 1.239617, 6.317619, 9.795807, 2.699934, 2.214499, 1.199343, 1.021923, 1.054011, 0.701653], "val_accuracy": [0.25, 0.1786, 0.2143, 0.2143, 0.7857, 0.8214, 0.2143, 0.2143, 0.2143, 0.2143, 0.7857], "val_auc": [0.3333, 0.3106, 0.2803, 0.2273, 0.5379, 0.6136, 0.3258, 0.7197, 0.7652, 0.6288, 0.4697], "val_precision": [0.1429, 0.16, 0.2143, 0.2143, 0.0, 0.6667, 0.2143, 0.2143, 0.2143, 0.2143, 0.0], "val_recall": [0.5, 0.6667, 1.0, 1.0, 0.0, 0.3333, 1.0, 1.0, 1.0, 1.0, 0.0], "val_f1": [0.2222, 0.2581, 0.3529, 0.3529, 0.0, 0.4444, 0.3529, 0.3529, 0.3529, 0.3529, 0.0], "val_sensitivity": [0.5, 0.6667, 1.0, 1.0, 0.0, 0.3333, 1.0, 1.0, 1.0, 1.0, 0.0], "val_specificity": [0.1818, 0.0455, 0.0, 0.0, 1.0, 0.9545, 0.0, 0.0, 0.0, 0.0, 1.0], "learning_rate": [0.00028, 0.00046, 0.00064, 0.00082, 0.001, 0.00090451, 0.00065451, 0.00034549, 9.549e-05, 0.0, 0.0011]};
+
+    if (!metrics.epoch || metrics.epoch.length === 0) {
+        document.querySelector('.grid').innerHTML =
+            '<div class="no-data">No training data yet. Start training to see metrics.</div>';
+    } else {
+        const epochs = metrics.epoch;
+        const latest = {};
+        for (const key in metrics) {
+            if (metrics[key].length > 0) latest[key] = metrics[key][metrics[key].length - 1];
+        }
+
+        // Stats cards
+        const statsData = [
+            { label: 'Best Val AUC', value: Math.max(...(metrics.val_auc || [0])).toFixed(4) },
+            { label: 'Latest Sensitivity', value: (latest.val_sensitivity || 0).toFixed(4) },
+            { label: 'Latest Specificity', value: (latest.val_specificity || 0).toFixed(4) },
+            { label: 'Epochs Trained', value: epochs.length },
+        ];
+        const statsGrid = document.getElementById('statsGrid');
+        statsData.forEach(s => {
+            statsGrid.innerHTML += `<div class="stat"><div class="value">${s.value}</div><div class="label">${s.label}</div></div>`;
+        });
+
+        const chartOpts = {
+            responsive: true,
+            plugins: { legend: { labels: { color: '#ccc' } } },
+            scales: {
+                x: { title: { display: true, text: 'Epoch', color: '#888' }, ticks: { color: '#888' } },
+                y: { ticks: { color: '#888' } }
+            }
+        };
+
+        new Chart('lossChart', {
+            type: 'line', data: {
+                labels: epochs,
+                datasets: [
+                    { label: 'Train Loss', data: metrics.train_loss, borderColor: '#ff6384', tension: 0.3 },
+                    { label: 'Val Loss', data: metrics.val_loss, borderColor: '#36a2eb', tension: 0.3 },
+                ]
+            }, options: chartOpts
+        });
+
+        new Chart('aucChart', {
+            type: 'line', data: {
+                labels: epochs,
+                datasets: [
+                    { label: 'Train AUC', data: metrics.train_auc, borderColor: '#ff6384', tension: 0.3 },
+                    { label: 'Val AUC', data: metrics.val_auc, borderColor: '#36a2eb', tension: 0.3 },
+                ]
+            }, options: chartOpts
+        });
+
+        new Chart('sensSpecChart', {
+            type: 'line', data: {
+                labels: epochs,
+                datasets: [
+                    { label: 'Sensitivity', data: metrics.val_sensitivity, borderColor: '#4bc0c0', tension: 0.3 },
+                    { label: 'Specificity', data: metrics.val_specificity, borderColor: '#ff9f40', tension: 0.3 },
+                ]
+            }, options: chartOpts
+        });
+
+        new Chart('prfChart', {
+            type: 'line', data: {
+                labels: epochs,
+                datasets: [
+                    { label: 'Precision', data: metrics.val_precision, borderColor: '#9966ff', tension: 0.3 },
+                    { label: 'Recall', data: metrics.val_recall, borderColor: '#ff6384', tension: 0.3 },
+                    { label: 'F1', data: metrics.val_f1, borderColor: '#4bc0c0', tension: 0.3 },
+                ]
+            }, options: chartOpts
+        });
+
+        new Chart('lrChart', {
+            type: 'line', data: {
+                labels: epochs,
+                datasets: [
+                    { label: 'Learning Rate', data: metrics.learning_rate, borderColor: '#ffcd56', tension: 0.3 },
+                ]
+            }, options: { ...chartOpts, scales: { ...chartOpts.scales, y: { type: 'logarithmic', ticks: { color: '#888' } } } }
+        });
+
+        new Chart('accChart', {
+            type: 'line', data: {
+                labels: epochs,
+                datasets: [
+                    { label: 'Train Accuracy', data: metrics.train_accuracy, borderColor: '#ff6384', tension: 0.3 },
+                    { label: 'Val Accuracy', data: metrics.val_accuracy, borderColor: '#36a2eb', tension: 0.3 },
+                ]
+            }, options: chartOpts
+        });
+    }
+    </script>
+</body>
+</html>
