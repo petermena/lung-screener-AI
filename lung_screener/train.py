@@ -359,37 +359,38 @@ class Trainer:
         # Per-class tracking
         tp = fp = fn = tn = 0
 
-        for batch in tqdm(loader, desc="Validation", leave=False):
-            patches = batch["patch"].to(self.device)
-            labels = batch["label"].to(self.device)
+        with torch.no_grad():
+            for batch in tqdm(loader, desc="Validation", leave=False):
+                patches = batch["patch"].to(self.device)
+                labels = batch["label"].to(self.device)
 
-            with autocast("cuda", enabled=torch.cuda.is_available()):
-                output = self.model(patches)
-                # Compute loss in float32 to avoid fp16 overflow in softmax/log
-                loss = self.criterion(output["logits"].float(), labels)
+                with autocast("cuda", enabled=torch.cuda.is_available()):
+                    output = self.model(patches)
+                    # Compute loss in float32 to avoid fp16 overflow in softmax/log
+                    loss = self.criterion(output["logits"].float(), labels)
 
-            # Skip entire batch if logits contain NaN (e.g. fp16 overflow)
-            if torch.isnan(output["logits"]).any():
-                logger.warning("  NaN detected in validation logits — skipping batch")
-                continue
+                # Skip entire batch if logits contain NaN (e.g. fp16 overflow)
+                if torch.isnan(output["logits"]).any():
+                    logger.warning("  NaN detected in validation logits — skipping batch")
+                    continue
 
-            batch_loss = loss.item()
-            if np.isfinite(batch_loss):
-                total_loss += batch_loss * patches.size(0)
-                loss_count += patches.size(0)
-            probs = torch.softmax(output["logits"], dim=1)[:, 1]
-            preds = (probs >= self.eval_threshold).long()
-            correct += (preds == labels).sum().item()
-            total += patches.size(0)
+                batch_loss = loss.item()
+                if np.isfinite(batch_loss):
+                    total_loss += batch_loss * patches.size(0)
+                    loss_count += patches.size(0)
+                probs = torch.softmax(output["logits"], dim=1)[:, 1]
+                preds = (probs >= self.eval_threshold).long()
+                correct += (preds == labels).sum().item()
+                total += patches.size(0)
 
-            # Confusion matrix components
-            tp += ((preds == 1) & (labels == 1)).sum().item()
-            fp += ((preds == 1) & (labels == 0)).sum().item()
-            fn += ((preds == 0) & (labels == 1)).sum().item()
-            tn += ((preds == 0) & (labels == 0)).sum().item()
+                # Confusion matrix components
+                tp += ((preds == 1) & (labels == 1)).sum().item()
+                fp += ((preds == 1) & (labels == 0)).sum().item()
+                fn += ((preds == 0) & (labels == 1)).sum().item()
+                tn += ((preds == 0) & (labels == 0)).sum().item()
 
-            all_probs.extend(probs.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
 
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0

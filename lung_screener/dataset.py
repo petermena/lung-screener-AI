@@ -1283,6 +1283,37 @@ class CombinedLungDataset(ConcatDataset):
             )])
 
         combined = cls(child_datasets)
+
+        # Apply max_val_candidates cap AFTER combining so the total
+        # validation size is bounded regardless of how many datasets are
+        # included.  Each child dataset may have already applied its own
+        # per-dataset cap — this second pass ensures the *combined* total
+        # respects the global budget.
+        max_val = data_config.get("max_val_candidates", 0)
+        if split != "train" and max_val > 0 and len(combined) > max_val:
+            # Collect (index, label) for every sample across all children
+            all_labels: list[int] = []
+            for child in child_datasets:
+                for s in child.samples:
+                    all_labels.append(s["label"])
+
+            pos_indices = [i for i, lab in enumerate(all_labels) if lab == 1]
+            neg_indices = [i for i, lab in enumerate(all_labels) if lab == 0]
+
+            max_neg = max(max_val - len(pos_indices), 0)
+            if len(neg_indices) > max_neg:
+                rng = np.random.RandomState(42)
+                neg_indices = list(rng.choice(neg_indices, max_neg, replace=False))
+
+            keep = sorted(pos_indices + neg_indices)
+            from torch.utils.data import Subset
+            combined = cls([Subset(combined, keep)])
+            logger.info(
+                "  Capped combined validation to %d samples "
+                "(kept all %d positives + %d negatives)",
+                len(keep), len(pos_indices), len(neg_indices),
+            )
+
         logger.info("Combined dataset (%s): %d total samples", split, len(combined))
         return combined
 
