@@ -111,3 +111,73 @@ def optimize_onnx(
     )
 
     return results
+
+
+def benchmark_onnx(
+    model_path: str | Path,
+    n_warmup: int = 5,
+    n_runs: int = 50,
+    batch_size: int = 1,
+    patch_size: tuple[int, ...] = (48, 48, 48),
+) -> dict:
+    """Benchmark ONNX model inference latency and throughput.
+
+    Args:
+        model_path: Path to .onnx model.
+        n_warmup: Warmup iterations (excluded from timing).
+        n_runs: Number of timed iterations.
+        batch_size: Batch size for benchmarking.
+        patch_size: Input patch dimensions.
+
+    Returns:
+        Dict with latency statistics and throughput.
+    """
+    import time
+
+    import numpy as np
+    import onnxruntime as ort
+
+    model_path = Path(model_path)
+    sess = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    provider = sess.get_providers()[0]
+
+    dummy = np.random.randn(batch_size, 1, *patch_size).astype(np.float32)
+
+    # Warmup
+    for _ in range(n_warmup):
+        sess.run(None, {"input": dummy})
+
+    # Timed runs
+    latencies = []
+    for _ in range(n_runs):
+        start = time.perf_counter()
+        sess.run(None, {"input": dummy})
+        elapsed = (time.perf_counter() - start) * 1000  # ms
+        latencies.append(elapsed)
+
+    latencies = np.array(latencies)
+
+    results = {
+        "model_path": str(model_path),
+        "provider": provider,
+        "batch_size": batch_size,
+        "n_runs": n_runs,
+        "avg_latency_ms": round(float(latencies.mean()), 2),
+        "std_latency_ms": round(float(latencies.std()), 2),
+        "min_latency_ms": round(float(latencies.min()), 2),
+        "max_latency_ms": round(float(latencies.max()), 2),
+        "p50_latency_ms": round(float(np.percentile(latencies, 50)), 2),
+        "p95_latency_ms": round(float(np.percentile(latencies, 95)), 2),
+        "p99_latency_ms": round(float(np.percentile(latencies, 99)), 2),
+        "throughput_patches_per_sec": round(float(batch_size * 1000 / latencies.mean()), 1),
+    }
+
+    logger.info(
+        "Benchmark: avg=%.1fms, p95=%.1fms, throughput=%.0f patches/sec (%s)",
+        results["avg_latency_ms"],
+        results["p95_latency_ms"],
+        results["throughput_patches_per_sec"],
+        provider,
+    )
+
+    return results

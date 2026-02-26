@@ -110,22 +110,33 @@ def train(ctx, epochs, batch_size, lr, resume, checkpoint_dir, dataset):
 @click.option("--checkpoint", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
 @click.option("--output", "-o", type=click.Path(), help="Output JSON results file")
 @click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory for metrics")
+@click.option("--full", is_flag=True, help="Include ROC/PR curves, histograms for dashboard")
 @click.pass_context
-def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir):
+def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir, full):
     """Evaluate model on the validation set with comprehensive metrics.
 
     Produces AUC-ROC (with 95% CI), sensitivity, specificity, precision,
     F1, ECE, operating point table, and FROC sensitivity.
 
+    Use --full to include ROC/PR curve data, confidence histograms, and
+    reliability diagrams for the metrics dashboard.
+
     \b
     Examples:
         lung-screener evaluate -m checkpoints/best.pth
-        lung-screener evaluate -m checkpoints/best.pth -o eval_results.json
+        lung-screener evaluate -m checkpoints/best.pth --full -o eval_results.json
     """
-    from .evaluate import evaluate, format_report
+    from .evaluate import format_report
 
     config = ctx.obj["config"]
-    results = evaluate(config, checkpoint, output_path=output)
+
+    if full:
+        from .evaluate import evaluate_full
+        results = evaluate_full(config, checkpoint, output_path=output)
+    else:
+        from .evaluate import evaluate
+        results = evaluate(config, checkpoint, output_path=output)
+
     click.echo(format_report(results))
 
 
@@ -468,12 +479,25 @@ def validate_input(input_path):
 @main.command(name="dashboard")
 @click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory with metrics.json")
 @click.option("--output", "-o", type=click.Path(), help="Output HTML file")
+@click.option("--eval-results", type=click.Path(exists=True), help="Evaluation results JSON")
+@click.option("--calibration", type=click.Path(exists=True), help="Calibration JSON")
+@click.option("--optimization", type=click.Path(exists=True), help="Optimization results JSON")
 @click.pass_context
-def dashboard(ctx, checkpoint_dir, output):
-    """Generate training metrics dashboard.
+def dashboard(ctx, checkpoint_dir, output, eval_results, calibration, optimization):
+    """Generate comprehensive metrics dashboard.
 
-    Creates an interactive HTML page with training curves, validation
-    metrics, and performance analysis.
+    Creates an interactive HTML page with training curves, evaluation
+    results (ROC, PR, FROC, confusion matrix), calibration analysis,
+    and optimization benchmarks.
+
+    Auto-detects eval_results.json, calibration.json, and
+    optimization_results.json in the checkpoint directory.
+
+    \b
+    Examples:
+        lung-screener dashboard
+        lung-screener dashboard --checkpoint-dir ./checkpoints
+        lung-screener dashboard --eval-results ./checkpoints/eval_results.json
     """
     from .metrics_dashboard import save_dashboard
 
@@ -483,7 +507,12 @@ def dashboard(ctx, checkpoint_dir, output):
         click.echo("Run training first to generate metrics.", err=True)
         sys.exit(1)
 
-    output_path = save_dashboard(metrics_path, output)
+    output_path = save_dashboard(
+        metrics_path, output,
+        eval_results_path=eval_results,
+        calibration_path=calibration,
+        optimization_path=optimization,
+    )
     click.echo(f"Dashboard saved to {output_path}")
 
 
@@ -919,6 +948,90 @@ def optimize_cmd(input_model, output, quantize):
     click.echo(f"  Reduction:    {results['reduction_pct']:.1f}%")
     click.echo(f"  Quantized:    {'yes (INT8)' if results['quantized'] else 'no'}")
     click.echo(f"  Output:       {results['output_path']}")
+
+
+@main.command(name="benchmark")
+@click.option("--model", "-m", type=click.Path(exists=True), required=True, help="ONNX model to benchmark")
+@click.option("--runs", "-n", type=int, default=50, help="Number of timed runs")
+@click.option("--batch-size", type=int, default=1, help="Batch size")
+def benchmark_cmd(model, runs, batch_size):
+    """Benchmark ONNX model inference latency and throughput.
+
+    \b
+    Examples:
+        lung-screener benchmark -m model.onnx
+        lung-screener benchmark -m model_optimized_q8.onnx -n 100 --batch-size 8
+    """
+    from .optimize import benchmark_onnx
+
+    results = benchmark_onnx(model, n_runs=runs, batch_size=batch_size)
+
+    click.echo("")
+    click.echo("Inference Benchmark Results")
+    click.echo(f"  Provider:     {results['provider']}")
+    click.echo(f"  Batch size:   {results['batch_size']}")
+    click.echo(f"  Runs:         {results['n_runs']}")
+    click.echo(f"  Avg latency:  {results['avg_latency_ms']:.1f} ms")
+    click.echo(f"  P50 latency:  {results['p50_latency_ms']:.1f} ms")
+    click.echo(f"  P95 latency:  {results['p95_latency_ms']:.1f} ms")
+    click.echo(f"  P99 latency:  {results['p99_latency_ms']:.1f} ms")
+    click.echo(f"  Throughput:   {results['throughput_patches_per_sec']:.0f} patches/sec")
+
+
+@main.command(name="pipeline")
+@click.option("--checkpoint", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Output directory")
+@click.option("--steps", "-s", multiple=True,
+              type=click.Choice(["evaluate", "dashboard", "calibrate", "export", "optimize", "kfold"]),
+              help="Steps to run (default: all except kfold)")
+@click.option("--kfold-folds", "-k", type=int, default=5, help="Number of folds for k-fold step")
+@click.pass_context
+def pipeline_cmd(ctx, checkpoint, checkpoint_dir, steps, kfold_folds):
+    """Run the full post-training pipeline.
+
+    Executes evaluation, dashboard generation, confidence calibration,
+    ONNX export, optimization, and optional k-fold cross-validation
+    in sequence.
+
+    \b
+    Steps (in order):
+      1. evaluate  - Full model evaluation with curves/histograms
+      2. calibrate - Temperature + Platt scaling comparison
+      3. export    - Export to ONNX format
+      4. optimize  - Graph optimization + INT8 quantization + benchmark
+      5. dashboard - Generate comprehensive HTML dashboard
+      6. kfold     - K-fold cross-validation training (optional)
+
+    \b
+    Examples:
+        lung-screener pipeline -m checkpoints/best.pth
+        lung-screener pipeline -m checkpoints/best.pth -s evaluate -s dashboard
+        lung-screener pipeline -m checkpoints/best.pth -s kfold -k 5
+    """
+    from .pipeline import run_pipeline
+
+    config = ctx.obj["config"]
+    step_list = list(steps) if steps else None
+
+    results = run_pipeline(
+        config,
+        checkpoint,
+        checkpoint_dir=checkpoint_dir,
+        steps=step_list,
+        kfold_folds=kfold_folds,
+    )
+
+    click.echo("")
+    click.echo("Pipeline complete!")
+    click.echo(f"  Output directory: {checkpoint_dir}")
+    click.echo(f"  Steps completed:  {', '.join(results.keys())}")
+    if "evaluate" in results:
+        m = results["evaluate"].get("metrics", {})
+        click.echo(f"  AUC-ROC:          {m.get('auc_roc', 'N/A')}")
+    if "calibrate" in results:
+        click.echo(f"  Calibration:      {results['calibrate'].get('best_method', 'N/A')} "
+                    f"(ECE: {results['calibrate'].get('best_ece', 'N/A')})")
+    click.echo(f"  Dashboard:        {checkpoint_dir}/dashboard.html")
 
 
 @main.command()
