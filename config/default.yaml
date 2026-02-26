@@ -2,7 +2,7 @@
 
 model:
   # Architecture: "resnet3d", "densenet3d", or "se_resnext3d"
-  architecture: "resnet3d"
+  architecture: "se_resnext3d"
   # Number of input channels (1 for CT grayscale)
   in_channels: 1
   # Number of output classes: [non-nodule, nodule]
