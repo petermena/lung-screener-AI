@@ -571,25 +571,99 @@ class NoduleSEResNeXt3D(nn.Module):
         return result
 
 
-def build_model(config: dict) -> nn.Module:
+def detect_architecture(state_dict: dict) -> dict:
+    """Auto-detect model architecture and hyperparameters from checkpoint weights.
+
+    Inspects state_dict keys and tensor shapes to determine which architecture
+    was used for training — resolving mismatches when the checkpoint's saved
+    config doesn't match the actual weights.
+
+    Args:
+        state_dict: Model state dict (OrderedDict of parameter tensors).
+
+    Returns:
+        Dict with detected model config keys (architecture, base_filters, etc.).
+    """
+    keys = set(state_dict.keys())
+
+    # Detect architecture from signature keys
+    has_stem = any(k.startswith("stem.") for k in keys)
+    has_se = any(".se." in k for k in keys)
+    has_conv3 = any(".conv3." in k for k in keys)
+    has_features = any(k.startswith("features.") for k in keys)
+    has_blocks = any(k.startswith("blocks.") for k in keys)
+
+    detected = {}
+
+    if has_features and has_blocks:
+        # DenseNet3D: has features.*, blocks.*, final_bn.*
+        detected["architecture"] = "densenet3d"
+    elif has_stem and (has_se or has_conv3):
+        # SE-ResNeXt3D: has stem.*, .se.*, .conv3.* (3-conv bottleneck)
+        detected["architecture"] = "se_resnext3d"
+        # Infer base_filters from stem conv
+        stem_key = "stem.0.weight"
+        if stem_key in state_dict:
+            detected["base_filters"] = state_dict[stem_key].shape[0]
+        # Infer cardinality and bottleneck_width from stage1 grouped conv
+        conv2_key = "stage1.0.conv2.weight"
+        if conv2_key in state_dict:
+            w = state_dict[conv2_key]
+            group_width = w.shape[0]
+            channels_per_group = w.shape[1]
+            cardinality = group_width // channels_per_group
+            detected["cardinality"] = cardinality
+            detected["bottleneck_width"] = channels_per_group
+    else:
+        # ResNet3D: has conv1.*, stage*.*, basic blocks
+        detected["architecture"] = "resnet3d"
+        # Infer base_filters from initial conv
+        conv1_key = "conv1.weight"
+        if conv1_key in state_dict:
+            detected["base_filters"] = state_dict[conv1_key].shape[0]
+
+    return detected
+
+
+def build_model(config: dict, state_dict: dict | None = None) -> nn.Module:
     """Factory function to build model from config.
+
+    When a state_dict is provided, the architecture is auto-detected from the
+    checkpoint weights, overriding the config.  This handles cases where the
+    checkpoint was saved with an incorrect or incomplete config.
 
     Args:
         config: Model configuration dict.
+        state_dict: Optional state dict for architecture auto-detection.
 
     Returns:
         Instantiated model.
     """
     model_config = config.get("model", {})
-    arch = model_config.get("architecture", "resnet3d")
     in_channels = model_config.get("in_channels", 1)
     num_classes = model_config.get("num_classes", 2)
     predict_nodule_type = model_config.get("predict_nodule_type", False)
+
+    # Auto-detect architecture from weights if available
+    if state_dict is not None:
+        detected = detect_architecture(state_dict)
+        config_arch = model_config.get("architecture", "resnet3d")
+        if detected["architecture"] != config_arch:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Config says '%s' but checkpoint weights are '%s' — using detected architecture",
+                config_arch, detected["architecture"],
+            )
+        # Merge detected values (detected takes priority)
+        model_config = {**model_config, **detected}
+
+    arch = model_config.get("architecture", "resnet3d")
 
     if arch == "resnet3d":
         return NoduleResNet3D(
             in_channels=in_channels,
             num_classes=num_classes,
+            base_filters=model_config.get("base_filters", 32),
             predict_nodule_type=predict_nodule_type,
         )
     elif arch == "densenet3d":

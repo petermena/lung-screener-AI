@@ -33,16 +33,12 @@ def export_to_onnx(
     """
     output_path = Path(output_path)
 
-    # Load model
+    # Load checkpoint and auto-detect architecture from weights
     device = torch.device("cpu")
-    model = build_model(config).to(device)
-
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
-
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    model = build_model(config, state_dict=state_dict).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
 
     # Create dummy input matching expected patch size

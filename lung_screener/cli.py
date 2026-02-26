@@ -819,13 +819,11 @@ def calibrate_cmd(ctx, checkpoint, method, output):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     click.echo(f"Calibrating on device: {device}")
 
-    # Load model
-    model = build_model(config).to(device)
+    # Load checkpoint and auto-detect architecture from weights
     ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
-    if "model_state_dict" in ckpt:
-        model.load_state_dict(ckpt["model_state_dict"])
-    else:
-        model.load_state_dict(ckpt)
+    state_dict = ckpt.get("model_state_dict", ckpt)
+    model = build_model(config, state_dict=state_dict).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
 
     # Collect logits from validation set

@@ -306,14 +306,10 @@ def load_model_for_gradcam(
         Tuple of (model, device).
     """
     dev = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    model = build_model(config).to(dev)
-
     checkpoint = torch.load(checkpoint_path, map_location=dev, weights_only=False)
-    if "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
-
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    model = build_model(config, state_dict=state_dict).to(dev)
+    model.load_state_dict(state_dict)
     model.eval()
     logger.info(f"Loaded model from {checkpoint_path} on {dev}")
     return model, dev
