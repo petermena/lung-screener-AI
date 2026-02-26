@@ -784,6 +784,145 @@ def data_prepare(ctx, output_dir):
     click.echo(f"  lung-screener train  (set data.dataset_dir to {result_dir} in config)")
 
 
+@main.command(name="calibrate")
+@click.option("--checkpoint", "-m", type=click.Path(exists=True), required=True, help="Model checkpoint")
+@click.option("--method", type=click.Choice(["temperature", "platt"]), default="temperature",
+              help="Calibration method")
+@click.option("--output", "-o", default="./checkpoints/calibration.json", help="Output calibration file")
+@click.pass_context
+def calibrate_cmd(ctx, checkpoint, method, output):
+    """Calibrate model confidence scores on the validation set.
+
+    Learns a calibration mapping so that when the model says 80%% confidence,
+    approximately 80%% of those cases are true positives.
+
+    \b
+    Methods:
+      temperature  - Temperature scaling (Guo et al., ICML 2017)
+      platt        - Platt/logistic scaling (Platt, 1999)
+
+    \b
+    Examples:
+        lung-screener calibrate -m checkpoints/best.pth
+        lung-screener calibrate -m checkpoints/best.pth --method platt
+    """
+    import numpy as np
+    import torch
+    from torch.amp import autocast
+    from torch.utils.data import DataLoader
+
+    from .calibration import PlattScaler, TemperatureScaler, _expected_calibration_error
+    from .dataset import CombinedLungDataset
+    from .model import build_model
+
+    config = ctx.obj["config"]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    click.echo(f"Calibrating on device: {device}")
+
+    # Load model
+    model = build_model(config).to(device)
+    ckpt = torch.load(checkpoint, map_location=device, weights_only=False)
+    if "model_state_dict" in ckpt:
+        model.load_state_dict(ckpt["model_state_dict"])
+    else:
+        model.load_state_dict(ckpt)
+    model.eval()
+
+    # Collect logits from validation set
+    val_dataset = CombinedLungDataset.from_config(config, split="val", augment=False)
+    val_dataset.warm_disk_cache()
+    train_config = config.get("training", {})
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=train_config.get("batch_size", 24),
+        shuffle=False,
+        num_workers=train_config.get("num_workers", 2),
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    all_logits = []
+    all_labels = []
+    with torch.no_grad():
+        for batch in val_loader:
+            patches = batch["patch"].to(device)
+            labels = batch["label"]
+            with autocast("cuda", enabled=torch.cuda.is_available()):
+                model_out = model(patches)
+            all_logits.append(model_out["logits"].cpu().numpy())
+            all_labels.extend(labels.numpy())
+
+    logits = np.concatenate(all_logits, axis=0)
+    labels = np.array(all_labels)
+
+    # Pre-calibration ECE
+    probs_before = torch.softmax(torch.from_numpy(logits).float(), dim=1)[:, 1].numpy()
+    ece_before = _expected_calibration_error(probs_before, labels)
+
+    # Fit calibration
+    click.echo(f"Fitting {method} scaling on {len(labels)} samples...")
+
+    if method == "temperature":
+        scaler = TemperatureScaler()
+        scaler.fit(logits, labels)
+        probs_after = scaler.calibrate(logits)
+        scaler.save(output)
+    else:
+        scaler = PlattScaler()
+        scores = probs_before
+        scaler.fit(scores, labels)
+        probs_after = scaler.calibrate(scores)
+        scaler.save(output)
+
+    ece_after = _expected_calibration_error(probs_after, labels)
+
+    click.echo("")
+    click.echo("Calibration Results")
+    click.echo(f"  Method:     {method}")
+    if method == "temperature":
+        click.echo(f"  Temperature: {scaler.temperature:.4f}")
+    else:
+        click.echo(f"  A={scaler.a:.4f}, B={scaler.b:.4f}")
+    click.echo(f"  ECE before: {ece_before:.4f}")
+    click.echo(f"  ECE after:  {ece_after:.4f}")
+    click.echo(f"  Improvement: {(ece_before - ece_after):.4f}")
+    click.echo(f"  Saved to:   {output}")
+
+
+@main.command(name="optimize")
+@click.option("--input", "-i", "input_model", type=click.Path(exists=True), required=True,
+              help="Input ONNX model")
+@click.option("--output", "-o", default=None, help="Output optimized ONNX model")
+@click.option("--quantize", is_flag=True, help="Apply INT8 dynamic quantization")
+def optimize_cmd(input_model, output, quantize):
+    """Optimize an ONNX model for faster inference and smaller size.
+
+    Applies ONNX Runtime graph optimizations (constant folding, operator
+    fusion) and optionally INT8 dynamic quantization.
+
+    \b
+    Examples:
+        lung-screener optimize -i model.onnx
+        lung-screener optimize -i model.onnx --quantize
+        lung-screener optimize -i model.onnx -o model_opt.onnx --quantize
+    """
+    from .optimize import optimize_onnx
+
+    if output is None:
+        stem = Path(input_model).stem
+        suffix = "_optimized_q8" if quantize else "_optimized"
+        output = str(Path(input_model).parent / f"{stem}{suffix}.onnx")
+
+    results = optimize_onnx(input_model, output, quantize=quantize)
+
+    click.echo("")
+    click.echo("ONNX Optimization Results")
+    click.echo(f"  Original:     {results['original_size_mb']:.1f} MB")
+    click.echo(f"  Optimized:    {results['optimized_size_mb']:.1f} MB")
+    click.echo(f"  Reduction:    {results['reduction_pct']:.1f}%")
+    click.echo(f"  Quantized:    {'yes (INT8)' if results['quantized'] else 'no'}")
+    click.echo(f"  Output:       {results['output_path']}")
+
+
 @main.command()
 @click.pass_context
 def verify(ctx):
