@@ -160,6 +160,10 @@ data:
       dataset_dir: "./data/luna25"
 
 # False positive reduction (second-stage classifier)
+# NOTE: Disabled by design. Threshold sweep evaluation showed the two-stage
+# pipeline reduced FPs by only 12.8% while increasing false negatives by 40.7%
+# (27 → 38 missed nodules at threshold 0.15). Stage 1 alone (AUC=0.9804,
+# sensitivity=0.9357) is the accepted primary output for clinical use.
 fp_reduction:
   enabled: false
   model_path: ""
