@@ -69,13 +69,11 @@ class ActiveLearner:
             config.get("model", {}).get("patch_size", [48, 48, 48])
         )
 
-        # Load model
-        self.model = build_model(config).to(self.device)
+        # Load model (auto-detect architecture from checkpoint weights)
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-        if "model_state_dict" in checkpoint:
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            self.model.load_state_dict(checkpoint)
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        self.model = build_model(config, state_dict=state_dict).to(self.device)
+        self.model.load_state_dict(state_dict)
 
     @torch.no_grad()
     def rank_by_entropy(

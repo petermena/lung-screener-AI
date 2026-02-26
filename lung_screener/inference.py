@@ -399,20 +399,16 @@ class NoduleDetector:
             "predict_nodule_type", False
         )
 
-        # Build and load model
-        self.model = build_model(config).to(self.device)
+        # Build and load model (auto-detect architecture from checkpoint weights)
         if model_path:
-            self._load_model(model_path)
-        self.model.eval()
-
-    def _load_model(self, path: str | Path):
-        """Load trained model weights from checkpoint."""
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
-        if "model_state_dict" in checkpoint:
-            self.model.load_state_dict(checkpoint["model_state_dict"])
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+            state_dict = checkpoint.get("model_state_dict", checkpoint)
+            self.model = build_model(config, state_dict=state_dict).to(self.device)
+            self.model.load_state_dict(state_dict)
+            logger.info(f"Loaded model from {model_path}")
         else:
-            self.model.load_state_dict(checkpoint)
-        logger.info(f"Loaded model from {path}")
+            self.model = build_model(config).to(self.device)
+        self.model.eval()
 
     @torch.no_grad()
     def predict_scan(self, image: sitk.Image, series_uid: str = "") -> ScanResult:

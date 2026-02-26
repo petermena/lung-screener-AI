@@ -155,15 +155,13 @@ class IncrementalRetrainer:
             f"{export_result['rejected_count']} rejected"
         )
 
-        # Step 3: Load base model and evaluate baseline
-        model = build_model(self.config).to(self.device)
+        # Step 3: Load base model and evaluate baseline (auto-detect architecture)
         checkpoint = torch.load(
             self.base_checkpoint, map_location=self.device, weights_only=False
         )
-        if "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            model.load_state_dict(checkpoint)
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        model = build_model(self.config, state_dict=state_dict).to(self.device)
+        model.load_state_dict(state_dict)
 
         val_loader = self._create_val_loader()
         baseline_metrics = self._evaluate(model, val_loader)

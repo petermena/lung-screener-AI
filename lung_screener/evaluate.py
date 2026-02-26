@@ -47,13 +47,11 @@ def evaluate(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Evaluating on device: %s", device)
 
-    # Build model and load weights
-    model = build_model(config).to(device)
+    # Load checkpoint and auto-detect architecture from weights
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    if "model_state_dict" in checkpoint:
-        model.load_state_dict(checkpoint["model_state_dict"])
-    else:
-        model.load_state_dict(checkpoint)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    model = build_model(config, state_dict=state_dict).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
 
     epoch = checkpoint.get("epoch", "unknown")
