@@ -867,12 +867,10 @@ def main():
     # Step 1: Load first-stage model
     # ------------------------------------------------------------------
     logger.info("\n[Step 1/4] Loading first-stage model...")
-    first_stage_model = build_model(config).to(device)
     ckpt = torch.load(first_stage_path, map_location=device, weights_only=False)
-    if "model_state_dict" in ckpt:
-        first_stage_model.load_state_dict(ckpt["model_state_dict"])
-    else:
-        first_stage_model.load_state_dict(ckpt)
+    state_dict = ckpt.get("model_state_dict", ckpt)
+    first_stage_model = build_model(config, state_dict=state_dict).to(device)
+    first_stage_model.load_state_dict(state_dict)
     first_stage_model.eval()
     logger.info("  Loaded first-stage model from %s (epoch %s)", first_stage_path, ckpt.get("epoch", "?"))
 
@@ -948,14 +946,12 @@ def main():
     logger.info("\n[Step 4/4] Evaluating combined two-stage pipeline...")
 
     # Reload first-stage model (was freed after scoring to save GPU memory)
-    first_stage_model = build_model(config).to(device)
     ckpt = torch.load(first_stage_path, map_location=device, weights_only=False)
-    if "model_state_dict" in ckpt:
-        first_stage_model.load_state_dict(ckpt["model_state_dict"])
-    else:
-        first_stage_model.load_state_dict(ckpt)
+    state_dict = ckpt.get("model_state_dict", ckpt)
+    first_stage_model = build_model(config, state_dict=state_dict).to(device)
+    first_stage_model.load_state_dict(state_dict)
     first_stage_model.eval()
-    del ckpt
+    del ckpt, state_dict
 
     # Load best FP reduction model
     fp_model = FPReductionNet(in_channels=1, base_filters=32).to(device)

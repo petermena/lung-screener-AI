@@ -2,7 +2,7 @@
 
 model:
   # Architecture: "resnet3d", "densenet3d", or "se_resnext3d"
-  architecture: "resnet3d"
+  architecture: "se_resnext3d"
   # Number of input channels (1 for CT grayscale)
   in_channels: 1
   # Number of output classes: [non-nodule, nodule]
@@ -12,7 +12,7 @@ model:
   # Enable nodule type classification (solid, part-solid, ground-glass)
   predict_nodule_type: false
   # SE-ResNeXt3D specific options (only used when architecture=se_resnext3d)
-  base_filters: 64
+  base_filters: 32
   cardinality: 32
   bottleneck_width: 4
   se_reduction: 16
