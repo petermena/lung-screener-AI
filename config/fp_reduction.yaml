@@ -12,7 +12,7 @@
 # undersampling during the scoring pass.
 training:
   pos_neg_ratio: 0.01
-  num_workers: 2
+  num_workers: 6  # scoring pass is IO-bound; g4dn.xlarge has 4 vCPUs but more workers reduces stalls
 
 # FP reduction model training hyperparameters
 fp_reduction_training:
@@ -21,7 +21,7 @@ fp_reduction_training:
   learning_rate: 0.0005
   weight_decay: 0.0001
   early_stopping_patience: 12
-  num_workers: 2
+  num_workers: 4  # FP training dataset is in-memory; 4 workers matches vCPU count
   # Scale factor for the positive-class weight (default 1.0).
   # Increase (e.g. 1.5) to push the model harder toward sensitivity;
   # decrease (e.g. 0.7) to favor specificity.
