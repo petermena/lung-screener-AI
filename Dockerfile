@@ -85,10 +85,9 @@ RUN pip install --no-cache-dir -e .
 # Copy the ONNX model from builder stage
 COPY --from=builder /build/model/model.onnx /app/model/model.onnx
 
-# Copy calibration if available
-ARG CAL_PATH=""
-RUN if [ -n "${CAL_PATH}" ]; then mkdir -p /app/model; fi
-COPY ${CAL_PATH:-.dockerignore} /app/model/calibration.json*
+# Copy calibration (defaults to checkpoints/calibration.json if it exists)
+ARG CAL_PATH=checkpoints/calibration.json
+COPY ${CAL_PATH} /app/model/calibration.json
 
 # Expose DICOM SCP port
 EXPOSE 11112
