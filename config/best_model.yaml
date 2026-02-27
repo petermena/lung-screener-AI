@@ -43,7 +43,7 @@ training:
     flip: true
     scale_range: [0.9, 1.1]
     noise_std: 0.01
-    elastic_deformation: false
+    elastic_deformation: true
     elastic_alpha: 20.0
     elastic_sigma: 3.5
     intensity_shift: 0.05
