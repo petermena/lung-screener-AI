@@ -71,7 +71,11 @@ def _cache_luna16_volume(args: tuple) -> str | None:
         volume = result["volume"]
         origin = result["origin"]
 
-        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        except FileExistsError:
+            if not Path(cache_dir).is_dir():
+                raise
         tmp_path = Path(cache_dir) / f"{seriesuid}.tmp.{os.getpid()}.npy"
         np.save(tmp_path, volume.astype(np.float16))
         os.replace(tmp_path, cache_path)
@@ -110,7 +114,7 @@ class LUNA16Dataset(Dataset):
         self.config = config
         self.split = split
         self.augment = augment and split == "train"
-        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
         self.preprocessor = CTPreprocessor(config)
         self.patch_size = tuple(config.get("model", {}).get("patch_size", [48, 48, 48]))
 
@@ -297,7 +301,11 @@ class LUNA16Dataset(Dataset):
 
         # Save to disk cache (atomic write to avoid corruption from parallel workers)
         if self.cache_dir:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+            except FileExistsError:
+                if not self.cache_dir.is_dir():
+                    raise
             # np.save() auto-appends .npy, so use a suffix that already ends in .npy
             tmp_path = self.cache_dir / f"{seriesuid}.tmp.{os.getpid()}.npy"
             cache_path = self.cache_dir / f"{seriesuid}.npy"
@@ -412,7 +420,11 @@ class LUNA16Dataset(Dataset):
 
         # Persist so future runs are instant
         if self.cache_dir:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+            except FileExistsError:
+                if not self.cache_dir.is_dir():
+                    raise
             np.save(
                 self.cache_dir / f"{seriesuid}_origin.npy",
                 np.array(origin, dtype=np.float64),
@@ -655,7 +667,7 @@ class LUNA25Dataset(Dataset):
         self.config = config
         self.split = split
         self.augment = augment and split == "train"
-        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.cache_dir = Path(cache_dir).resolve() if cache_dir else None
         self.preprocessor = CTPreprocessor(config)
         self.patch_size = tuple(config.get("model", {}).get("patch_size", [48, 48, 48]))
 
@@ -907,7 +919,11 @@ class LUNA25Dataset(Dataset):
         origin = read_volume_origin(vol_path)
 
         if self.cache_dir:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+            except FileExistsError:
+                if not self.cache_dir.is_dir():
+                    raise
             np.save(
                 self.cache_dir / f"luna25_{seriesuid}_origin.npy",
                 np.array(origin, dtype=np.float64),
@@ -971,7 +987,11 @@ class LUNA25Dataset(Dataset):
         origin = result["origin"]
 
         if self.cache_dir:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+            except FileExistsError:
+                if not self.cache_dir.is_dir():
+                    raise
             # np.save() auto-appends .npy, so use a suffix that already ends in .npy
             tmp_path = self.cache_dir / f"luna25_{seriesuid}.tmp.{os.getpid()}.npy"
             cache_path = self.cache_dir / f"luna25_{seriesuid}.npy"
