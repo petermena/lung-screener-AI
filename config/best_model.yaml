@@ -25,30 +25,32 @@ model:
   drop_path_rate: 0.2
 
 training:
-  batch_size: 32          # A10G has 24GB VRAM — doubled from T4 config
-  learning_rate: 0.0004   # Linear-scaled for 2x batch size
+  batch_size: 16          # Smaller batch for larger model (T4 16GB VRAM)
+  learning_rate: 0.0002   # Slightly higher for AdamW with warm restarts
   weight_decay: 0.0001
   epochs: 150             # More epochs to benefit from warm restarts + SWA
-  num_workers: 4
+  num_workers: 2
   pos_neg_ratio: 0.5
 
+  # Start with plain CE to verify convergence, switch to focal loss later.
   loss:
-    type: "focal"
-    focal_gamma: 2.0
-    focal_alpha: 0.25      # down-weights easy negatives; addresses 1:10.7 val imbalance
+    type: "cross_entropy"
+    label_smoothing: 0.0
 
+  # Moderate augmentation — converge first, add aggressive augs later
   augmentation:
     rotation: true
     flip: true
     scale_range: [0.9, 1.1]
     noise_std: 0.01
-    elastic_deformation: true
+    elastic_deformation: false
     elastic_alpha: 20.0
     elastic_sigma: 3.5
     intensity_shift: 0.05
     intensity_scale: 0.05
     mixup_alpha: 0.0
-    cutout: true
+    # CutOut: disabled until model converges
+    cutout: false
     cutout_size: 12
     cutout_n_holes: 2
     # Multi-scale training: disabled until model converges
