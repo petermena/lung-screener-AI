@@ -775,6 +775,12 @@ class Trainer:
                     epoch, train_metrics, is_best=False, phase="train_done"
                 )
 
+            # Re-warm OS page cache for val volumes before every validation pass.
+            # Training evicts val pages (training data ~25 GB > 16 GB RAM), so
+            # without this, val workers page-fault every volume from NVMe and
+            # each validation batch takes 50-100× longer than necessary.
+            val_loader.dataset.warm_disk_cache()
+
             # Validate — use SWA model for eval when active
             if self.swa_enabled and epoch >= self.swa_start_epoch and self.swa_model is not None:
                 # Only update SWA model if base model weights are clean.

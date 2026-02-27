@@ -356,6 +356,19 @@ class LUNA16Dataset(Dataset):
             logger.info(
                 "LUNA16: All %d volumes already cached on disk", len(unique_series)
             )
+            # Mmap each volume and scan it sequentially so the OS page cache is
+            # warm when DataLoader workers start.  Without this, validation
+            # workers page-fault every volume from NVMe (training evicts those
+            # pages), making each validation batch 50-100× slower than needed.
+            new_mmaps = [s for s in unique_series if s not in self._volume_cache]
+            if new_mmaps:
+                logger.info(
+                    "LUNA16: Warming OS page cache for %d volumes...", len(new_mmaps)
+                )
+                for sid in new_mmaps:
+                    vol = np.load(self.cache_dir / f"{sid}.npy", mmap_mode="r")
+                    np.sum(vol)  # sequential scan → all pages into OS cache
+                    self._volume_cache[sid] = vol
             return
 
         n_workers = min(os.cpu_count() or 1, len(uncached))
@@ -1036,6 +1049,17 @@ class LUNA25Dataset(Dataset):
             logger.info(
                 "LUNA25: All %d volumes already cached on disk", len(unique_series)
             )
+            new_mmaps = [s for s in unique_series if s not in self._volume_cache]
+            if new_mmaps:
+                logger.info(
+                    "LUNA25: Warming OS page cache for %d volumes...", len(new_mmaps)
+                )
+                for sid in new_mmaps:
+                    vol = np.load(
+                        self.cache_dir / f"luna25_{sid}.npy", mmap_mode="r"
+                    )
+                    np.sum(vol)
+                    self._volume_cache[sid] = vol
             return
 
         logger.info(
@@ -1342,7 +1366,21 @@ class CombinedLungDataset(ConcatDataset):
 
         Call this in the main process *before* creating DataLoader workers
         so that workers find fast cached .npy files on disk.
+
+        Also traverses ``Subset`` and nested ``ConcatDataset`` wrappers so
+        that validation datasets (which are wrapped in a ``Subset`` by the
+        ``max_val_candidates`` cap) are warmed correctly.
         """
-        for ds in self.datasets:
+        from torch.utils.data import Subset, ConcatDataset
+
+        def _recurse(ds: object) -> None:
             if hasattr(ds, "_warm_cache"):
                 ds._warm_cache()
+            elif isinstance(ds, Subset):
+                _recurse(ds.dataset)
+            elif isinstance(ds, ConcatDataset):
+                for child in ds.datasets:
+                    _recurse(child)
+
+        for ds in self.datasets:
+            _recurse(ds)
