@@ -17,7 +17,7 @@ model:
   num_classes: 2
   patch_size: [48, 48, 48]
   predict_nodule_type: false
-  # Architecture hyperparameters tuned for T4 GPU
+  # Architecture hyperparameters tuned for A10G GPU
   base_filters: 64
   cardinality: 32
   bottleneck_width: 4
@@ -25,11 +25,11 @@ model:
   drop_path_rate: 0.2
 
 training:
-  batch_size: 16          # Smaller batch for larger model (T4 16GB VRAM)
-  learning_rate: 0.0002   # Slightly higher for AdamW with warm restarts
+  batch_size: 32          # A10G 24GB VRAM — doubled from T4 config
+  learning_rate: 0.0004   # Linear-scaled for 2x batch size (0.0002 × 2)
   weight_decay: 0.0001
   epochs: 150             # More epochs to benefit from warm restarts + SWA
-  num_workers: 2
+  num_workers: 3          # 3 of 4 vCPUs for data loading; 1 reserved for main process
   pos_neg_ratio: 0.5
 
   # Start with plain CE to verify convergence, switch to focal loss later.
