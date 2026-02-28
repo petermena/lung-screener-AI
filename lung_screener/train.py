@@ -651,6 +651,7 @@ class Trainer:
         """
         checkpoint = {
             "epoch": epoch,
+            "total_epochs": self.epochs,
             "phase": phase,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -918,6 +919,7 @@ def train_kfold(
     n_folds: int = 5,
     checkpoint_dir: str | Path = "./checkpoints",
     resume: bool = False,
+    start_fold: int = 0,
 ):
     """Run k-fold cross-validation training.
 
@@ -938,7 +940,7 @@ def train_kfold(
     checkpoint_dir = Path(checkpoint_dir)
     all_fold_metrics: list[dict] = []
 
-    for fold in range(n_folds):
+    for fold in range(start_fold, n_folds):
         fold_dir = checkpoint_dir / f"fold_{fold}"
         fold_dir.mkdir(parents=True, exist_ok=True)
 
@@ -954,7 +956,8 @@ def train_kfold(
             total_epochs = config.get("training", {}).get("epochs", 150)
             finished_epoch = ckpt.get("epoch", 0)
 
-            if finished_epoch >= total_epochs - 1 and ckpt.get("phase") == "complete":
+            fold_total = ckpt.get("total_epochs", total_epochs)
+            if finished_epoch >= fold_total - 1 and ckpt.get("phase") == "complete":
                 # Fold fully finished — load its metrics and skip.
                 auc = ckpt.get("best_val_auc",
                                ckpt.get("metrics", {}).get("auc", 0.0))

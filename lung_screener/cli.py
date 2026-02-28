@@ -147,6 +147,8 @@ def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir, full):
 @click.option("--lr", type=float, help="Override learning rate")
 @click.option("--resume", is_flag=True, default=False,
               help="Resume: skip completed folds, resume incomplete ones from latest checkpoint")
+@click.option("--start-fold", type=int, default=0,
+              help="Start from this fold index (0-based), skipping earlier folds entirely")
 @click.option("--checkpoint-dir", default="./checkpoints", help="Root checkpoint directory")
 @click.option(
     "--dataset",
@@ -155,7 +157,7 @@ def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir, full):
     help="Add a dataset (repeatable)",
 )
 @click.pass_context
-def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, resume, checkpoint_dir, dataset):
+def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, resume, start_fold, checkpoint_dir, dataset):
     """Run k-fold cross-validation training.
 
     Trains K independent models, each validated on a different fold
@@ -188,7 +190,7 @@ def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, resume, checkpoint_dir, 
             {"type": kind, "dataset_dir": path} for kind, path in dataset
         ]
 
-    summary = train_kfold(config, n_folds=folds, checkpoint_dir=checkpoint_dir, resume=resume)
+    summary = train_kfold(config, n_folds=folds, checkpoint_dir=checkpoint_dir, resume=resume, start_fold=start_fold)
 
     click.echo("")
     click.echo(f"K-Fold Training Complete ({summary['n_folds']} folds)")
