@@ -30,7 +30,7 @@ training:
   weight_decay: 0.0001
   epochs: 150             # More epochs to benefit from warm restarts + SWA
   num_workers: 3          # 3 of 4 vCPUs for data loading; 1 reserved for main process
-  pos_neg_ratio: 0.35         # Reduced from 0.5 → 2.86:1 neg:pos to improve specificity
+  pos_neg_ratio: 0.25         # Reduced from 0.35 → 4:1 neg:pos to improve specificity
 
   loss:
     type: "focal"
