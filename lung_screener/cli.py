@@ -597,6 +597,56 @@ def feedback_cmd(ctx, feedback_dir, export_dir):
                     f"{result['rejected_count']} negative annotations to {export_dir}")
 
 
+@main.command(name="watch")
+@click.option("--watch-dir", default=None, help="Directory to monitor for incoming DICOM SRs (default: PACS storage_dir from config)")
+@click.option("--feedback-dir", default="./data/feedback", help="Feedback storage directory")
+@click.option("--model", "-m", type=click.Path(exists=True), default=None, help="Model checkpoint for auto-retrain")
+@click.option("--auto-retrain", is_flag=True, help="Trigger incremental retrain when threshold is reached")
+@click.option("--retrain-threshold", default=20, show_default=True, help="New feedback records needed to trigger auto-retrain")
+@click.option("--interval", default=30, show_default=True, help="Poll interval in seconds")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory for retraining")
+@click.pass_context
+def watch(ctx, watch_dir, feedback_dir, model, auto_retrain, retrain_threshold, interval, checkpoint_dir):
+    """Watch for radiologist-verified DICOM SRs and record feedback automatically.
+
+    Polls the incoming DICOM directory for SRs with VerificationFlag=VERIFIED,
+    parses confirmed/rejected findings, and stores them in the feedback log.
+    Unverified SRs are skipped and re-checked on the next poll.
+
+    Optionally triggers incremental retraining (--auto-retrain) when the number
+    of new records since the last retrain reaches --retrain-threshold.
+
+    \b
+    Examples:
+        lung-screener watch
+        lung-screener watch --watch-dir /dicom/incoming --interval 60
+        lung-screener watch -m checkpoints/best.pth --auto-retrain
+        lung-screener watch -m checkpoints/best.pth --auto-retrain --retrain-threshold 50
+    """
+    from .sr_watcher import SRWatcher
+
+    config = ctx.obj["config"]
+
+    # Fall back to PACS storage_dir from config if --watch-dir not given
+    if not watch_dir:
+        watch_dir = config.get("pacs", {}).get("storage_dir", "./data/incoming")
+
+    if auto_retrain and not model:
+        raise click.UsageError("--auto-retrain requires --model/-m to be specified")
+
+    watcher = SRWatcher(
+        watch_dir=watch_dir,
+        feedback_dir=feedback_dir,
+        poll_interval=interval,
+        auto_retrain=auto_retrain,
+        retrain_threshold=retrain_threshold,
+        model_path=model,
+        checkpoint_dir=checkpoint_dir,
+        config=config,
+    )
+    watcher.run()
+
+
 @main.command(name="retrain")
 @click.option("--checkpoint", "-m", type=click.Path(exists=True), required=True, help="Current best model checkpoint")
 @click.option("--feedback-dir", default="./data/feedback", help="Feedback storage directory")
