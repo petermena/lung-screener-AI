@@ -419,6 +419,8 @@ class FPReductionTrainer:
             num_workers=self.num_workers,
             pin_memory=pin_memory,
             drop_last=True,
+            prefetch_factor=4 if self.num_workers > 0 else None,
+            persistent_workers=self.num_workers > 0,
         )
         val_loader = DataLoader(
             val_dataset,
@@ -426,6 +428,8 @@ class FPReductionTrainer:
             shuffle=False,
             num_workers=self.num_workers,
             pin_memory=pin_memory,
+            prefetch_factor=4 if self.num_workers > 0 else None,
+            persistent_workers=self.num_workers > 0,
         )
 
         history = []
@@ -895,6 +899,7 @@ def main():
         num_workers=num_workers,
         pin_memory=device.type == "cuda",
         persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
     logger.info("  Training candidates to score: %d", len(train_dataset))
 

@@ -147,6 +147,8 @@ def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir, full):
 @click.option("--lr", type=float, help="Override learning rate")
 @click.option("--resume", is_flag=True, default=False,
               help="Resume: skip completed folds, resume incomplete ones from latest checkpoint")
+@click.option("--start-fold", type=int, default=0,
+              help="Start from this fold index (0-based), skipping earlier folds entirely")
 @click.option("--checkpoint-dir", default="./checkpoints", help="Root checkpoint directory")
 @click.option(
     "--dataset",
@@ -155,7 +157,7 @@ def evaluate_cmd(ctx, checkpoint, output, checkpoint_dir, full):
     help="Add a dataset (repeatable)",
 )
 @click.pass_context
-def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, resume, checkpoint_dir, dataset):
+def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, resume, start_fold, checkpoint_dir, dataset):
     """Run k-fold cross-validation training.
 
     Trains K independent models, each validated on a different fold
@@ -188,7 +190,7 @@ def train_kfold_cmd(ctx, folds, epochs, batch_size, lr, resume, checkpoint_dir, 
             {"type": kind, "dataset_dir": path} for kind, path in dataset
         ]
 
-    summary = train_kfold(config, n_folds=folds, checkpoint_dir=checkpoint_dir, resume=resume)
+    summary = train_kfold(config, n_folds=folds, checkpoint_dir=checkpoint_dir, resume=resume, start_fold=start_fold)
 
     click.echo("")
     click.echo(f"K-Fold Training Complete ({summary['n_folds']} folds)")
@@ -593,6 +595,56 @@ def feedback_cmd(ctx, feedback_dir, export_dir):
         result = store.export_for_training(export_dir)
         click.echo(f"\nExported {result['confirmed_count']} positive and "
                     f"{result['rejected_count']} negative annotations to {export_dir}")
+
+
+@main.command(name="watch")
+@click.option("--watch-dir", default=None, help="Directory to monitor for incoming DICOM SRs (default: PACS storage_dir from config)")
+@click.option("--feedback-dir", default="./data/feedback", help="Feedback storage directory")
+@click.option("--model", "-m", type=click.Path(exists=True), default=None, help="Model checkpoint for auto-retrain")
+@click.option("--auto-retrain", is_flag=True, help="Trigger incremental retrain when threshold is reached")
+@click.option("--retrain-threshold", default=20, show_default=True, help="New feedback records needed to trigger auto-retrain")
+@click.option("--interval", default=30, show_default=True, help="Poll interval in seconds")
+@click.option("--checkpoint-dir", default="./checkpoints", help="Checkpoint directory for retraining")
+@click.pass_context
+def watch(ctx, watch_dir, feedback_dir, model, auto_retrain, retrain_threshold, interval, checkpoint_dir):
+    """Watch for radiologist-verified DICOM SRs and record feedback automatically.
+
+    Polls the incoming DICOM directory for SRs with VerificationFlag=VERIFIED,
+    parses confirmed/rejected findings, and stores them in the feedback log.
+    Unverified SRs are skipped and re-checked on the next poll.
+
+    Optionally triggers incremental retraining (--auto-retrain) when the number
+    of new records since the last retrain reaches --retrain-threshold.
+
+    \b
+    Examples:
+        lung-screener watch
+        lung-screener watch --watch-dir /dicom/incoming --interval 60
+        lung-screener watch -m checkpoints/best.pth --auto-retrain
+        lung-screener watch -m checkpoints/best.pth --auto-retrain --retrain-threshold 50
+    """
+    from .sr_watcher import SRWatcher
+
+    config = ctx.obj["config"]
+
+    # Fall back to PACS storage_dir from config if --watch-dir not given
+    if not watch_dir:
+        watch_dir = config.get("pacs", {}).get("storage_dir", "./data/incoming")
+
+    if auto_retrain and not model:
+        raise click.UsageError("--auto-retrain requires --model/-m to be specified")
+
+    watcher = SRWatcher(
+        watch_dir=watch_dir,
+        feedback_dir=feedback_dir,
+        poll_interval=interval,
+        auto_retrain=auto_retrain,
+        retrain_threshold=retrain_threshold,
+        model_path=model,
+        checkpoint_dir=checkpoint_dir,
+        config=config,
+    )
+    watcher.run()
 
 
 @main.command(name="retrain")
@@ -1189,6 +1241,71 @@ def gradcam(ctx, input_path, model, output, view, num_slices, alpha, max_finding
 
     gc.release()
     click.echo(f"\nSaved {count} GradCAM visualizations to {output_dir}/")
+
+
+@main.command()
+@click.option(
+    "--checkpoint", "-m",
+    required=True,
+    type=click.Path(exists=True),
+    help="Model checkpoint (.pth) to load for inference",
+)
+@click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind the server to")
+@click.option("--port", default=8080,      show_default=True, help="Port to listen on")
+@click.option(
+    "--upload-dir",
+    default="/tmp/lung_viewer",
+    show_default=True,
+    help="Directory for temporary DICOM uploads",
+)
+@click.pass_context
+def viewer(ctx, checkpoint, host, port, upload_dir):
+    """Start the web-based DICOM viewer with AI nodule detection.
+
+    Launches a local web server that accepts DICOM uploads (individual files
+    or ZIP archives), runs the nodule detection model, and displays results
+    in an interactive viewer with windowing, zoom, measurement tools, and
+    an auto-generated radiology report.
+
+    Open http://localhost:<port>/ in your browser after starting.
+
+    \b
+    Examples:
+      lung-screener viewer -m checkpoints/best.pth
+      lung-screener viewer -m checkpoints/best.pth --port 9090
+      lung-screener viewer -m checkpoints/fold_0/best.pth --host 127.0.0.1
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        click.echo(
+            "Error: uvicorn is required. Install it with:\n"
+            "  pip install 'lung-screener[server]'",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        import lung_screener.api as api_module
+    except ImportError as e:
+        click.echo(f"Error importing viewer API: {e}", err=True)
+        sys.exit(1)
+
+    config = ctx.obj["config"]
+
+    # Load the detector before starting the server so the first upload is fast
+    click.echo(f"Loading model from {checkpoint} …")
+    from lung_screener.inference import NoduleDetector
+
+    api_module._detector = NoduleDetector(config, model_path=checkpoint)
+
+    upload_path = Path(upload_dir)
+    upload_path.mkdir(parents=True, exist_ok=True)
+    api_module.UPLOAD_DIR = upload_path
+
+    url = f"http://{'localhost' if host == '0.0.0.0' else host}:{port}/"
+    click.echo(f"Viewer ready — open {url}")
+    uvicorn.run(api_module.app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

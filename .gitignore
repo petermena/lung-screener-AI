@@ -19,11 +19,12 @@ data/
 *.raw
 *.dcm
 
-# Model checkpoints — ignore weights, track metadata (eval_results.json, metrics.json)
+# Model checkpoints — ignore weights, track metadata only
 checkpoints/*
 !checkpoints/eval_results.json
 !checkpoints/metrics.json
 !checkpoints/dashboard.html
+!checkpoints/calibration.json
 *.pth
 *.pth.tmp
 *.pt
