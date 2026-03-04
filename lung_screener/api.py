@@ -18,10 +18,15 @@ import pydicom
 import SimpleITK as sitk
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Lung Nodule AI Viewer", version="1.0.0")
+
+# Serve bundled JS/CSS vendor files at /static/vendor — no CDN needed
+_static_dir = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 # In-memory study registry {study_id: study_dict}
 _studies: dict[str, dict] = {}

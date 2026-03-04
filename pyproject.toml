@@ -51,7 +51,7 @@ lung-screener = "lung_screener.cli:main"
 include = ["lung_screener*"]
 
 [tool.setuptools.package-data]
-lung_screener = ["static/*.html"]
+lung_screener = ["static/*.html", "static/vendor/*.js"]
 
 [tool.ruff]
 target-version = "py310"

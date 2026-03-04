@@ -30,6 +30,13 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
+# Viewer (web UI) dependencies — always included
+VIEWER_REQUIREMENTS = [
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "python-multipart>=0.0.6",
+]
+
 # Minimal dependencies for ONNX-based offline inference
 ONNX_REQUIREMENTS = [
     "onnxruntime>=1.16",
@@ -41,7 +48,7 @@ ONNX_REQUIREMENTS = [
     "SimpleITK>=2.3",
     "pyyaml>=6.0",
     "click>=8.1",
-]
+] + VIEWER_REQUIREMENTS
 
 # Full requirements (includes PyTorch)
 FULL_REQUIREMENTS = [
@@ -54,7 +61,7 @@ FULL_REQUIREMENTS = [
     "SimpleITK>=2.3",
     "pyyaml>=6.0",
     "click>=8.1",
-]
+] + VIEWER_REQUIREMENTS
 
 
 def download_wheels(requirements: list[str], dest: Path, platform: str | None = None):
@@ -132,6 +139,9 @@ echo "To use Lung Screener AI:"
 echo "  source $SCRIPT_DIR/venv/bin/activate"
 echo "  lung-screener predict /path/to/dicom/series -m $SCRIPT_DIR/model/model.{'onnx' if mode == 'onnx' else 'pth'}"
 echo ""
+echo "To start the web viewer (fully offline, open http://localhost:8080):"
+echo "  lung-screener viewer -m $SCRIPT_DIR/model/model.{'onnx' if mode == 'onnx' else 'pth'}"
+echo ""
 echo "To start PACS listener:"
 echo "  lung-screener serve -m $SCRIPT_DIR/model/model.{'onnx' if mode == 'onnx' else 'pth'}"
 """
@@ -163,7 +173,8 @@ echo.
 echo === Installation complete ===
 echo.
 echo Activate with: %~dp0venv\\Scripts\\activate.bat
-echo Then run: lung-screener predict C:\\path\\to\\dicom -m %~dp0model\\model.{'onnx' if mode == 'onnx' else 'pth'}
+echo Then run:      lung-screener predict C:\\path\\to\\dicom -m %~dp0model\\model.{'onnx' if mode == 'onnx' else 'pth'}
+echo Or viewer:     lung-screener viewer -m %~dp0model\\model.{'onnx' if mode == 'onnx' else 'pth'}
 """
     bat_path = package_dir / "install.bat"
     bat_path.write_text(bat_script)
