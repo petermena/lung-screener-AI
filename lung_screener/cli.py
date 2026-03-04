@@ -1243,5 +1243,70 @@ def gradcam(ctx, input_path, model, output, view, num_slices, alpha, max_finding
     click.echo(f"\nSaved {count} GradCAM visualizations to {output_dir}/")
 
 
+@main.command()
+@click.option(
+    "--checkpoint", "-m",
+    required=True,
+    type=click.Path(exists=True),
+    help="Model checkpoint (.pth) to load for inference",
+)
+@click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind the server to")
+@click.option("--port", default=8080,      show_default=True, help="Port to listen on")
+@click.option(
+    "--upload-dir",
+    default="/tmp/lung_viewer",
+    show_default=True,
+    help="Directory for temporary DICOM uploads",
+)
+@click.pass_context
+def viewer(ctx, checkpoint, host, port, upload_dir):
+    """Start the web-based DICOM viewer with AI nodule detection.
+
+    Launches a local web server that accepts DICOM uploads (individual files
+    or ZIP archives), runs the nodule detection model, and displays results
+    in an interactive viewer with windowing, zoom, measurement tools, and
+    an auto-generated radiology report.
+
+    Open http://localhost:<port>/ in your browser after starting.
+
+    \b
+    Examples:
+      lung-screener viewer -m checkpoints/best.pth
+      lung-screener viewer -m checkpoints/best.pth --port 9090
+      lung-screener viewer -m checkpoints/fold_0/best.pth --host 127.0.0.1
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        click.echo(
+            "Error: uvicorn is required. Install it with:\n"
+            "  pip install 'lung-screener[server]'",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        import lung_screener.api as api_module
+    except ImportError as e:
+        click.echo(f"Error importing viewer API: {e}", err=True)
+        sys.exit(1)
+
+    config = ctx.obj["config"]
+
+    # Load the detector before starting the server so the first upload is fast
+    click.echo(f"Loading model from {checkpoint} …")
+    from lung_screener.inference import NoduleDetector
+
+    api_module._detector = NoduleDetector(config, model_path=checkpoint)
+
+    upload_path = Path(upload_dir)
+    upload_path.mkdir(parents=True, exist_ok=True)
+    api_module.UPLOAD_DIR = upload_path
+
+    url = f"http://{'localhost' if host == '0.0.0.0' else host}:{port}/"
+    click.echo(f"Viewer ready — open {url}")
+    uvicorn.run(api_module.app, host=host, port=port, log_level="info")
+
+
 if __name__ == "__main__":
     main()
