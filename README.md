@@ -1,191 +1,400 @@
 # Lung Screener AI
 
-AI-powered lung nodule detection for CT scans with GE Centricity PACS integration.
+AI-powered lung nodule detection for chest CT scans — with an integrated web viewer, PACS integration, and fully offline operation.
 
-## Overview
+> **Disclaimer:** Research prototype. Clinical use requires FDA 510(k) clearance. All AI findings must be reviewed by a qualified radiologist before clinical action.
 
-Lung Screener AI is a deep learning system that detects and classifies lung nodules on chest CT scans. It provides:
+---
 
-- **3D CNN models** (ResNet3D / DenseNet3D) trained on LUNA16 + LUNA25 datasets
-- **Automated Lung-RADS categorization** based on nodule size
-- **DICOM networking** for direct PACS integration via C-STORE SCP/SCU
-- **Structured Report generation** to send findings back to PACS
+## What it does
 
-> **Disclaimer**: This is a research prototype. Clinical use requires FDA 510(k) clearance. All AI findings must be reviewed by a qualified radiologist.
+- Detects and measures lung nodules in chest CT scans with **AUC-ROC 0.985** (5-fold CV)
+- Assigns **ACR Lung-RADS v2022** categories with type-specific thresholds (solid / part-solid / ground-glass)
+- Generates **dictation-ready radiology reports** — separate from PowerScribe, copy-paste ready
+- Provides an **interactive browser-based DICOM viewer** with windowing, zoom, pan, and measurement tools, with nodule locations marked directly on the images
+- Accepts studies via **drag-and-drop upload**, **DICOM C-STORE** from PACS, or **command-line batch** processing
+- Runs **completely offline** — no internet connection needed after installation
+
+---
+
+## Quick start
+
+```bash
+git clone <repo-url> && cd lung-screener-AI
+pip install -e ".[server]"
+
+# Start the viewer with your trained model
+lung-screener viewer -m checkpoints/best.pth
+
+# Open http://localhost:8080 — drag DICOM files into the browser
+```
+
+---
+
+## Web Viewer
+
+The viewer is a browser-based DICOM workstation. Start it with one command:
+
+```bash
+lung-screener viewer -m checkpoints/best.pth
+lung-screener viewer -m checkpoints/best.pth --port 9090   # custom port
+lung-screener viewer -m checkpoints/fold_3/best.pth        # specific fold
+```
+
+Then open **http://localhost:8080** in any browser (Chrome, Firefox, Edge).
+
+### How to use
+
+1. **Upload a study** — drag and drop `.dcm` files or a `.zip` archive onto the left panel, or click to browse
+2. **Wait for analysis** — the model runs automatically; a status indicator shows progress
+3. **Review findings** — nodules appear as color-coded circles directly on the images; click any finding card to jump to that slice
+4. **Adjust the image** — use windowing presets (Lung / Mediastinum / Bone), or drag the WW/WC sliders
+5. **Measure** — select the Measure tool and draw a line across any structure
+6. **Copy the report** — the right panel shows a full structured report; click Copy to paste it anywhere
+
+### Viewer tools
+
+| Tool | How to activate | Action |
+|------|----------------|--------|
+| Window / Level | `W/L` button or left-click drag on image | Adjust contrast |
+| Pan | Middle-click drag | Move image |
+| Zoom | `Zoom` button + left-click drag | Zoom in/out |
+| Measure | `Measure` button + click-drag | Draw a calibrated ruler (mm) |
+| Scroll slices | Mouse wheel | Navigate through CT slices |
+| Arrow keys | ↑ ↓ → ← | Previous / next slice |
+
+### Window presets
+
+| Preset | WW / WC | Best for |
+|--------|---------|----------|
+| Lung | 1500 / −600 | Lung parenchyma, nodule shape |
+| Mediastinum | 350 / 40 | Soft tissue, lymph nodes |
+| Bone | 2000 / 300 | Ribs, vertebrae |
+
+### Nodule overlay colors
+
+| Color | Lung-RADS | Recommendation |
+|-------|-----------|----------------|
+| 🟢 Green | 1–2 | Routine annual screening |
+| 🟡 Yellow | 3 | 6-month follow-up LDCT |
+| 🟠 Orange | 4A | 3-month follow-up or PET/CT |
+| 🔴 Red | 4B / 4X | Tissue sampling / multidisciplinary review |
+
+### Report
+
+The report panel on the right shows a complete structured radiology report generated automatically from the AI findings. It is **independent of PowerScribe** — use the Copy button to paste it into any reporting system, EHR, or document. The report follows standard radiology prose style and includes:
+
+- Findings section (lobe location, size, type, Lung-RADS category, calcification)
+- Impression (overall Lung-RADS with clinical language)
+- Recommendation (ACR-aligned follow-up interval)
+
+---
 
 ## Architecture
 
 ```
-CT Scan (DICOM) → Preprocessing → Candidate Detection → 3D CNN Classification → Findings
-                                                                                    ↓
-                                                                           DICOM SR → PACS
+CT scan (DICOM) ──► Preprocessing ──► Lung segmentation ──► Candidate extraction
+                                                                      │
+                                                              3D patches (48³)
+                                                                      │
+                                                          SE-ResNeXt3D classifier
+                                                                      │
+                                               ┌──────────────────────┤
+                                               ▼                      ▼
+                                        NMS + filtering       Calcification analysis
+                                               │
+                                  Lung-RADS v2022 categorization
+                                  (type-specific: solid/part-solid/GGN)
+                                               │
+                               ┌───────────────┼───────────────┐
+                               ▼               ▼               ▼
+                          Web viewer     Text report      DICOM SR → PACS
 ```
 
-**Pipeline stages:**
-1. Load DICOM series and resample to isotropic 1mm spacing
-2. Apply HU windowing (-1200 to 600) and normalize
-3. Segment lung parenchyma via thresholding + morphology
-4. Extract nodule candidates using connected component analysis
-5. Classify each candidate with a 3D ResNet/DenseNet
-6. Apply non-maximum suppression
-7. Generate DICOM Structured Report with Lung-RADS categories
+**Model:** SE-ResNeXt3D — grouped convolutions (cardinality 32), squeeze-excitation attention, multi-scale fusion, stochastic depth, Stochastic Weight Averaging (SWA)
 
-## Setup
+**Training:** 5-fold cross-validation on LUNA16 + LUNA25, focal loss, test-time augmentation (8 flips/rotations), cosine warm restarts
+
+---
+
+## Installation
+
+### Standard
 
 ```bash
-# Clone and install
-git clone <repo-url> && cd lung-screener-AI
-pip install -e ".[dev]"
-
-# Download LUNA16 dataset (required for training)
-# https://luna16.grand-challenge.org/Download/
-# Place in ./data/luna16/
+pip install -e .            # core (training, inference, PACS)
+pip install -e ".[server]"  # + web viewer
+pip install -e ".[dev]"     # + testing tools
 ```
 
-## Usage
+### Fully offline (air-gapped machine)
 
-### Train a model
+The viewer and all JavaScript dependencies are bundled — no internet is needed at runtime. To deploy on a machine that has never had internet access:
 
 ```bash
-# Train with default config
-lung-screener train --checkpoint-dir ./checkpoints
+# On a machine WITH internet (one time):
+python scripts/package_offline.py \
+  --checkpoint checkpoints/best.pth \
+  --output dist/ \
+  --full          # include PyTorch for GPU; omit for lightweight ONNX mode
 
-# Custom config and hyperparameters
-lung-screener -c config/custom.yaml train --epochs 50 --batch-size 16 --lr 0.0005
+# Creates dist/lung-screener-offline.zip
+# Copy the zip to the target machine, then:
 
-# Resume from checkpoint
+unzip lung-screener-offline.zip
+cd lung-screener-offline
+./install.sh            # Linux/macOS
+install.bat             # Windows
+
+# Start the viewer — fully offline:
+source venv/bin/activate
+lung-screener viewer -m model/model.pth
+```
+
+**Package sizes:**
+
+| Mode | Approximate size | GPU support |
+|------|-----------------|-------------|
+| ONNX (default) | ~200 MB | CPU only |
+| Full (`--full`) | ~2.5 GB | CPU + CUDA GPU |
+
+---
+
+## Training
+
+### Single-fold
+
+```bash
+lung-screener -c config/best_model.yaml train \
+  --checkpoint-dir ./checkpoints \
+  --dataset luna16 ./data/luna16 \
+  --dataset luna25 ./data/luna25
+```
+
+### 5-fold cross-validation (recommended)
+
+```bash
+lung-screener -c config/best_model.yaml train-kfold \
+  -k 5 \
+  --checkpoint-dir checkpoints \
+  --resume          # safe to re-run; picks up from last completed epoch
+```
+
+Checkpoints for each fold are saved under `checkpoints/fold_N/`. Resume is automatic — re-running the same command after an interruption continues from where it left off.
+
+### Resume from checkpoint
+
+```bash
 lung-screener train --resume ./checkpoints/latest.pth
 ```
 
-### Run inference on a scan
+---
+
+## Inference
+
+### Web viewer (recommended)
 
 ```bash
-# On a DICOM directory
-lung-screener predict ./path/to/dicom/series -m ./checkpoints/best.pth
-
-# On a LUNA16 .mhd file, output as JSON
-lung-screener predict ./data/luna16/subset0/1.3.6.1.4.1.14519.mhd -m best.pth -o results.json --format json
+lung-screener viewer -m checkpoints/best.pth
+# Open http://localhost:8080 and drag in DICOM files
 ```
 
-### PACS integration
+### Command line — single scan
 
 ```bash
-# Verify PACS connectivity
+lung-screener predict ./path/to/dicom/series/ -m checkpoints/best.pth
+lung-screener predict ./scan.mhd             -m checkpoints/best.pth -o results.json
+```
+
+### Command line — batch processing
+
+```bash
+lung-screener batch ./dicom_studies/ -m checkpoints/best.pth -o results/
+```
+
+### Ensemble (multiple folds)
+
+```bash
+lung-screener ensemble-predict ./path/to/dicom/ \
+  --models checkpoints/fold_0/best.pth \
+           checkpoints/fold_1/best.pth \
+           checkpoints/fold_2/best.pth \
+           checkpoints/fold_3/best.pth
+```
+
+---
+
+## PACS integration
+
+The system speaks native DICOM networking and can receive studies directly from your PACS.
+
+```bash
+# Start DICOM C-STORE listener
+lung-screener serve -m checkpoints/best.pth --port 11112
+
+# Verify connectivity to PACS
 lung-screener verify
-
-# Start DICOM listener (receives studies, runs detection, sends SR back)
-lung-screener serve -m ./checkpoints/best.pth --port 11112
 ```
 
-**GE Centricity PACS configuration:**
+**GE Centricity configuration:**
 1. Add this system as a DICOM destination in Centricity:
    - AE Title: `LUNG_SCREEN_AI`
-   - Host: `<server-ip>`
+   - Host: `<this server's IP>`
    - Port: `11112`
-2. Configure auto-routing rules to push chest CT studies to this destination
-3. Edit `config/default.yaml` to set your Centricity connection details under `pacs:`
+2. Configure auto-routing to push chest CT series to this destination
+3. Edit `config/default.yaml` → `pacs:` section with your Centricity host/port/AE title
 
-## Model Performance
+Results are sent back as a DICOM Structured Report (SR) to the originating PACS.
 
-Evaluated on LUNA16 + LUNA25 combined dataset (6,233 candidates; 420 positives, 5,813 negatives) at epoch 76.
+---
+
+## Model performance
+
+Trained on LUNA16 (888 scans) + LUNA25 (~4,000 scans). Evaluated with 5-fold cross-validation.
+
+### 5-fold cross-validation results
+
+| Fold | Best AUC | Best Epoch |
+|------|----------|------------|
+| Fold 0 | 0.9821 | 75 |
+| Fold 1 | 0.9860 | 148 |
+| Fold 2 | 0.9796 | 137 |
+| Fold 3 | **0.9889** | 139 |
+| **Mean** | **0.9842** | — |
+
+### Overall metrics (single model, epoch 133)
 
 | Metric | Value |
 |--------|-------|
-| AUC-ROC | **0.982** (95% CI: 0.978–0.985) |
+| AUC-ROC | **0.9817** (95% CI: 0.978–0.985) |
 | Sensitivity | 95.5% @ threshold 0.15 |
 | Specificity | 90.3% @ threshold 0.15 |
 | NPV | 99.1% |
 | ECE (calibration) | 0.045 |
 
-**FROC sensitivity** (sensitivity at given false-positive rates per scan):
+### FROC sensitivity
 
-| FP rate | 0.0125 | 0.025 | 0.05 | 0.1 | 0.2 | 0.4 |
+Sensitivity at fixed false-positive rates per scan (lower FP rate = more conservative):
+
+| FP/scan | 0.0125 | 0.025 | 0.05 | 0.1 | 0.2 | 0.4 |
 |---------|--------|-------|------|-----|-----|-----|
 | Sensitivity | 70.5% | 80.2% | 86.7% | 95.5% | 99.5% | 100% |
 
-**Operating-point trade-offs:**
+### Threshold trade-offs
 
 | Threshold | Sensitivity | Specificity | Precision |
 |-----------|-------------|-------------|-----------|
-| 0.10 | 95.5% | 90.3% | 41.6% |
-| 0.15 (optimal) | — | — | — |
+| 0.10 | 97.1% | 87.4% | 37.2% |
+| **0.15** (Youden optimal) | 95.5% | 90.3% | 41.6% |
 | 0.20 | 94.3% | 91.9% | 45.8% |
 | 0.50 | 87.4% | 94.8% | 54.6% |
 | 0.90 | 74.8% | 98.3% | 76.2% |
 
+---
+
 ## Configuration
 
-All settings are in `config/default.yaml`. Key options:
+Key settings in `config/default.yaml` (override with `config/best_model.yaml` for best performance):
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `model.architecture` | `resnet3d` | `resnet3d` or `densenet3d` |
-| `model.patch_size` | `[48,48,48]` | 3D patch size for candidates |
-| `preprocessing.target_spacing` | `[1,1,1]` | Isotropic resampling (mm) |
-| `inference.threshold` | `0.15` | Detection confidence threshold (Youden's J optimal) |
+| `model.architecture` | `se_resnext3d` | `resnet3d`, `densenet3d`, or `se_resnext3d` |
+| `model.patch_size` | `[48,48,48]` | 3D patch size for candidates (voxels) |
+| `model.predict_nodule_type` | `true` | Classify solid / part-solid / ground-glass |
+| `preprocessing.target_spacing` | `[1,1,1]` | Isotropic resampling spacing (mm) |
+| `inference.threshold` | `0.15` | Detection confidence threshold (Youden's J) |
+| `inference.nms_distance_mm` | `10.0` | Non-maximum suppression radius |
+| `inference.tta.enabled` | `true` | Test-time augmentation (8 flips/rotations) |
+| `training.swa.enabled` | `true` | Stochastic Weight Averaging |
 | `pacs.local_port` | `11112` | DICOM listener port |
-| `pacs.remote_ae_title` | `GEPACS` | Your Centricity AE title |
+| `pacs.remote_ae_title` | `GEPACS` | Destination PACS AE title |
 
-## Project Structure
+---
+
+## Project structure
 
 ```
 lung_screener/
-├── __init__.py
-├── cli.py              # Command-line interface
-├── model.py            # 3D CNN architectures (ResNet3D, DenseNet3D)
-├── preprocessing.py    # DICOM loading, resampling, lung segmentation
-├── dataset.py          # LUNA16 data loading and augmentation
-├── train.py            # Training loop with mixed precision
-├── inference.py        # End-to-end detection pipeline
-└── pacs.py             # DICOM networking and SR generation
+├── api.py                  # FastAPI backend (upload, inference, DICOM serving)
+├── cli.py                  # All CLI commands (train, predict, viewer, serve, …)
+├── model.py                # SE-ResNeXt3D / ResNet3D / DenseNet3D architectures
+├── inference.py            # End-to-end detection pipeline, NoduleDetector
+├── preprocessing.py        # DICOM loading, resampling, lung segmentation
+├── dataset.py              # LUNA16/LUNA25 data loading and augmentation
+├── train.py                # Training loop (mixed precision, SWA, k-fold)
+├── evaluate.py             # AUC, FROC, calibration metrics
+├── pacs.py                 # DICOM C-STORE SCP/SCU, Structured Report generation
+├── risk_model.py           # Brock/PanCan malignancy scoring, Lung-RADS v2022
+├── calcification.py        # Benign calcification pattern detection
+├── calibration.py          # Confidence calibration (temperature scaling)
+├── fp_reduction.py         # 2nd-stage false positive reduction
+├── gradcam.py              # Grad-CAM saliency visualization
+├── feedback.py             # Radiologist feedback collection
+├── retrain.py              # Incremental retraining from feedback
+├── active_learning.py      # Uncertainty sampling
+├── prior_comparison.py     # Nodule growth tracking vs. prior studies
+├── export.py               # ONNX export
+├── optimize.py             # Model quantization / pruning
+├── static/
+│   ├── viewer.html         # Self-contained browser DICOM viewer
+│   └── vendor/             # Bundled JavaScript (Cornerstone.js — no CDN needed)
+└── …
+
+config/
+├── default.yaml            # Default hyperparameters
+├── best_model.yaml         # Optimized config (SE-ResNeXt3D, SWA, TTA, A10G GPU)
+└── fp_reduction.yaml       # 2nd-stage classifier config
+
+scripts/
+├── package_offline.py      # Bundle everything for air-gapped deployment
+├── run_kfold_cv.sh         # Launch k-fold training
+├── inspect_fold_checkpoint.py  # Diagnose k-fold checkpoints
+└── …
 ```
 
-## Training Data
+---
 
-This system trains on two public datasets:
+## Lung-RADS categories
 
-- **[LUNA16](https://luna16.grand-challenge.org/)** (derived from LIDC-IDRI): 888 CT scans with expert nodule annotations including location (x, y, z) and diameter, plus candidate locations with class labels
-- **[LUNA25](https://luna25.grand-challenge.org/)**: Additional annotated nodule data with volumetric blocks and full CT volumes
+The system assigns [ACR Lung-RADS v2022](https://www.acr.org/Clinical-Resources/Reporting-and-Data-Systems/Lung-Rads) categories automatically, with type-specific thresholds.
 
-## Lung-RADS Categories
+### Solid nodules
 
-The system assigns [ACR Lung-RADS v2022](https://www.acr.org/Clinical-Resources/Reporting-and-Data-Systems/Lung-Rads) categories with type-specific thresholds for solid, part-solid, and ground-glass nodules.
+| Category | Diameter | Recommendation |
+|----------|----------|----------------|
+| 1 | None detected | Annual screening LDCT in 12 months |
+| 2 | < 6 mm | Annual screening LDCT in 12 months |
+| 3 | 6–8 mm | LDCT in 6 months |
+| 4A | 8–15 mm | LDCT in 3 months; PET/CT may be considered |
+| 4B | ≥ 15 mm | Tissue sampling and/or PET/CT; multidisciplinary review |
 
-### Solid Nodules
-
-| Category | Size | Recommendation |
-|----------|------|----------------|
-| 1 | No nodules | Continue annual screening with LDCT in 12 months |
-| 2 | <6mm | Continue annual screening with LDCT in 12 months |
-| 3 | 6–8mm | Short-term follow-up — LDCT in 6 months |
-| 4A | 8–15mm | LDCT in 3 months, PET/CT may be considered |
-| 4B | ≥15mm | Tissue sampling and/or PET/CT; multidisciplinary consultation |
-
-### Part-Solid (Subsolid) Nodules
+### Part-solid (subsolid) nodules
 
 | Category | Size | Recommendation |
 |----------|------|----------------|
-| 2 | <6mm total | Continue annual screening with LDCT in 12 months |
-| 3 | ≥6mm total, solid component <6mm | Short-term follow-up — LDCT in 6 months |
-| 4A | Solid component 6–8mm | LDCT in 3 months, PET/CT may be considered |
-| 4B | Solid component ≥8mm | Tissue sampling and/or PET/CT; multidisciplinary consultation |
+| 2 | < 6 mm total | Annual screening LDCT in 12 months |
+| 3 | ≥ 6 mm total, solid component < 6 mm | LDCT in 6 months |
+| 4A | Solid component 6–8 mm | LDCT in 3 months; PET/CT may be considered |
+| 4B | Solid component ≥ 8 mm | Tissue sampling and/or PET/CT |
 
-### Ground-Glass Nodules (GGN)
+### Ground-glass nodules (GGN)
 
 | Category | Size | Recommendation |
 |----------|------|----------------|
-| 2 | <30mm | Continue annual screening with LDCT in 12 months |
-| 3 | ≥30mm | Short-term follow-up — LDCT in 6 months |
+| 2 | < 30 mm | Annual screening LDCT in 12 months |
+| 3 | ≥ 30 mm | LDCT in 6 months |
 
-### Category 4X — Additional Suspicious Features
+### Category 4X — additional suspicious features
 
-The **4X** modifier is applied to any Category 3 or 4 nodule when additional features increase suspicion of malignancy:
+Applied to any Category 3–4 nodule with spiculated margins or interval growth. Recommendation: tissue sampling and/or PET/CT with multidisciplinary consultation.
 
-| Trigger | Description |
-|---------|-------------|
-| Spiculation | Nodule has spiculated (irregular/star-shaped) margins |
-| Interval growth | Nodule is growing or shows slow growth on prior comparison |
+> **Risk-based upgrade:** Brock/PanCan malignancy probability ≥ 15% automatically upgrades a Category 3 nodule to 4A.
 
-When 4X is assigned the recommendation is: **tissue sampling and/or PET/CT with multidisciplinary consultation**, regardless of the baseline size category.
+---
 
-> **Risk-based upgrade:** When a Brock/PanCan malignancy probability ≥15% is computed, a Category 3 nodule is automatically upgraded to 4A regardless of type.
+## Training data
+
+| Dataset | Scans | Source |
+|---------|-------|--------|
+| [LUNA16](https://luna16.grand-challenge.org/) | 888 | LIDC-IDRI; expert nodule annotations with location and diameter |
+| [LUNA25](https://luna25.grand-challenge.org/) | ~4,000 | Additional annotated nodule blocks and full volumes |
