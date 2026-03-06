@@ -64,7 +64,7 @@ FULL_REQUIREMENTS = [
 ] + VIEWER_REQUIREMENTS
 
 
-def download_wheels(requirements: list[str], dest: Path, platform: str | None = None):
+def download_wheels(requirements: list[str], dest: Path, platform: str | None = None, python_version: str = "310"):
     """Download wheel files for all dependencies."""
     dest.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -73,7 +73,7 @@ def download_wheels(requirements: list[str], dest: Path, platform: str | None = 
         "--only-binary", ":all:",
     ]
     if platform:
-        cmd.extend(["--platform", platform, "--python-version", "310"])
+        cmd.extend(["--platform", platform, "--python-version", python_version])
     cmd.extend(requirements)
 
     logger.info(f"Downloading wheels to {dest}...")
@@ -202,6 +202,10 @@ def main():
         "--platform", type=str, default=None,
         help="Target platform for wheels (e.g., manylinux2014_x86_64, win_amd64, macosx_11_0_x86_64)",
     )
+    parser.add_argument(
+        "--python-version", type=str, default="310",
+        help="Target Python version for wheels (e.g., 310, 311, 312, 314). Default: 310",
+    )
     args = parser.parse_args()
 
     project_root = Path(__file__).parent.parent
@@ -238,7 +242,7 @@ def main():
 
     # 2. Download dependency wheels
     logger.info("--- Step 2: Downloading dependency wheels ---")
-    download_wheels(requirements, package_dir / "wheels", args.platform)
+    download_wheels(requirements, package_dir / "wheels", args.platform, args.python_version)
 
     # 3. Copy source package
     logger.info("--- Step 3: Copying lung_screener package ---")
