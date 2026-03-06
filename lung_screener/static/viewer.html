@@ -263,6 +263,7 @@
       width: 100%; height: 100%;
       pointer-events: none;
     }
+    #overlay-canvas.marking { pointer-events: auto; cursor: crosshair; }
     #overlay-canvas.hidden { display: none; }
 
     #slice-nav {
@@ -559,6 +560,7 @@
         <button class="tool-btn"        id="btn-zoom"    onclick="setActiveTool('Zoom')">Zoom</button>
         <button class="tool-btn"        id="btn-measure" onclick="setActiveTool('Length')">Measure</button>
         <button class="tool-btn"        id="btn-mark"    onclick="setActiveTool('MarkNodule')" title="Click image to mark a missed nodule">+ Nodule</button>
+        <button class="tool-btn"        id="btn-clear-m" onclick="clearMeasurements()" title="Erase all ruler measurements">✕ Rulers</button>
       </div>
       <div class="tool-group nodule-toggle">
         <label>
@@ -616,7 +618,10 @@
   <aside id="right-panel">
     <div id="lungrads-banner"></div>
 
-    <div class="panel-section-title">Findings</div>
+    <div class="panel-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+      Findings
+      <button class="copy-btn" id="btn-save-corrections" onclick="saveCorrections()" style="display:none" title="Save edits to train the model">Save &amp; Train</button>
+    </div>
     <div id="findings-panel">
       <div class="empty-state">No findings yet</div>
     </div>
@@ -729,6 +734,7 @@ let currentSeriesUid = null;
 let imageIds         = [];
 let currentIndex     = 0;
 let findings         = [];
+let originalFindings = []; // AI-generated findings before any edits
 let pollingTimer     = null;
 let toolsRegistered  = false;
 let csEnabled        = false;
@@ -856,9 +862,11 @@ async function loadResults() {
     if (rRes.ok) {
       const data = await rRes.json();
       findings = data.findings || [];
+      originalFindings = JSON.parse(JSON.stringify(findings)); // deep-copy for diffing
       renderLungRadsBanner(data.lung_rads_overall);
       renderFindings(findings);
       drawOverlay();
+      document.getElementById('btn-save-corrections').style.display = 'inline-block';
       const n = findings.length;
       setStatus('complete',
         `Complete — LR-${data.lung_rads_overall} — ${n} finding${n !== 1 ? 's' : ''}`);
@@ -1081,7 +1089,7 @@ let pendingNodulePt = null; // { voxel_x, voxel_y, voxel_z }
 function setActiveTool(toolName) {
   // Clear mark-nodule mode
   isMarkingNodule = false;
-  overlayCanvas.style.cursor = '';
+  overlayCanvas.classList.remove('marking');
   document.getElementById('btn-mark')?.classList.remove('mark-active');
   closeNodulePopup();
 
@@ -1094,15 +1102,19 @@ function setActiveTool(toolName) {
 
   if (toolName === 'MarkNodule') {
     isMarkingNodule = true;
-    overlayCanvas.style.cursor = 'crosshair';
+    overlayCanvas.classList.add('marking');
     document.getElementById('btn-mark')?.classList.add('mark-active');
-    // Passivate all cs tools so mouse events reach the canvas
-    cornerstoneTools.setToolPassive('Wwwc');
     return;
   }
 
   cornerstoneTools.setToolActive(toolName, { mouseButtonMask: 1 });
   document.getElementById(TOOL_BTNS[toolName])?.classList.add('active');
+}
+
+function clearMeasurements() {
+  if (!csEnabled) return;
+  cornerstoneTools.clearToolState(csEl, 'Length');
+  cornerstone.updateImage(csEl);
 }
 
 // ── MARK NODULE — canvas click handler ───────────────────────────────────────
@@ -1351,6 +1363,92 @@ function fmtType(t) {
 
 function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+// ── SAVE CORRECTIONS ──────────────────────────────────────────────────────────
+
+async function saveCorrections() {
+  if (!currentStudyId) return;
+
+  const btn = document.getElementById('btn-save-corrections');
+  const origText = btn.textContent;
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  // Build correction payload:
+  // - AI findings that were deleted → rejected (false positives)
+  // - Current findings that were manually added → new positives
+  // - AI findings that survive → confirmed
+  const aiIds = new Set(originalFindings.map((_, i) => i));
+  const survivingAiIndices = new Set();
+
+  const corrections = [];
+
+  // Walk original AI findings — mark confirmed or rejected
+  originalFindings.forEach((orig, idx) => {
+    // A finding is "surviving" if a current finding has matching voxel coords
+    const stillPresent = findings.some(f =>
+      !f._manual &&
+      Math.abs((f.voxel_x || 0) - (orig.voxel_x || 0)) < 2 &&
+      Math.abs((f.voxel_y || 0) - (orig.voxel_y || 0)) < 2 &&
+      Math.abs((f.voxel_z || 0) - (orig.voxel_z || 0)) < 2
+    );
+    corrections.push({
+      finding_id: orig.finding_id || `ai_${currentStudyId}_${idx}`,
+      series_uid: currentSeriesUid || '',
+      is_manual:  false,
+      confirmed:  stillPresent,
+      ai_x:    orig.voxel_x || 0,
+      ai_y:    orig.voxel_y || 0,
+      ai_z:    orig.voxel_z || 0,
+      ai_diameter_mm: orig.diameter_mm || 0,
+      ai_confidence:  orig.confidence  || 0,
+      ai_lung_rads:   orig.lung_rads   || '1',
+      // Radiologist values = same as AI for confirmed, empty for rejected
+      radiologist_diameter_mm: stillPresent ? (orig.diameter_mm || 0) : 0,
+      radiologist_lung_rads:   stillPresent ? (orig.lung_rads   || '1') : '',
+    });
+  });
+
+  // Walk manually added findings — new positives the AI missed
+  findings.filter(f => f._manual).forEach((f, idx) => {
+    corrections.push({
+      finding_id: `manual_${currentStudyId}_${idx}`,
+      series_uid: currentSeriesUid || '',
+      is_manual:  true,
+      confirmed:  true,
+      ai_x:    f.voxel_x || 0,
+      ai_y:    f.voxel_y || 0,
+      ai_z:    f.voxel_z || 0,
+      ai_diameter_mm: 0,
+      ai_confidence:  0,
+      ai_lung_rads:   '1',
+      radiologist_diameter_mm: f.diameter_mm || 0,
+      radiologist_lung_rads:   f.lung_rads   || '1',
+    });
+  });
+
+  try {
+    const resp = await fetch(`/api/studies/${currentStudyId}/corrections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ series_uid: currentSeriesUid || '', corrections }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const result = await resp.json();
+    btn.textContent = `Saved (${result.recorded} records)`;
+    btn.style.background = '#238636';
+    setTimeout(() => {
+      btn.textContent = origText;
+      btn.style.background = '';
+      btn.disabled = false;
+    }, 3000);
+  } catch (e) {
+    btn.textContent = 'Error — retry';
+    btn.style.background = '#6e2020';
+    btn.disabled = false;
+    console.error('saveCorrections:', e);
+  }
 }
 </script>
 </body>

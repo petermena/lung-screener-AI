@@ -14,7 +14,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import pydicom
@@ -22,6 +22,7 @@ import SimpleITK as sitk
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +77,16 @@ async def upload_study(
     if not series_map:
         raise HTTPException(400, "No valid DICOM files found in upload")
 
+    # Extract patient/study metadata from the first series for feedback records
+    first_series = next(iter(series_map.values()), {})
     _studies[study_id] = {
         "id": study_id,
         "status": "queued",
         "created_at": time.time(),
         "dicom_dir": str(dicom_dir),
         "series": series_map,
+        "patient_id": first_series.get("patient_id", ""),
+        "study_date": first_series.get("study_date", ""),
         "results": None,
         "report": None,
         "error": None,
@@ -198,6 +203,70 @@ async def get_results(study_id: str):
     if study["status"] != "complete":
         raise HTTPException(202, f"Study not ready — status: {study['status']}")
     return study["results"]
+
+
+class CorrectionItem(BaseModel):
+    finding_id: str
+    series_uid: str
+    is_manual: bool = False
+    confirmed: bool
+    ai_x: float = 0.0
+    ai_y: float = 0.0
+    ai_z: float = 0.0
+    ai_diameter_mm: float = 0.0
+    ai_confidence: float = 0.0
+    ai_lung_rads: str = "1"
+    radiologist_diameter_mm: float = 0.0
+    radiologist_lung_rads: str = ""
+
+
+class CorrectionsPayload(BaseModel):
+    series_uid: str = ""
+    corrections: List[CorrectionItem]
+
+
+@app.post("/api/studies/{study_id}/corrections")
+async def save_corrections(study_id: str, payload: CorrectionsPayload):
+    """Record radiologist corrections from the web viewer into feedback.jsonl.
+
+    Confirmed findings (AI hits the user kept, or manually added nodules) are
+    stored as positive training examples.  Removed findings are stored as
+    false-positive negatives.  The IncrementalRetrainer reads feedback.jsonl
+    and fine-tunes the model once enough records accumulate.
+    """
+    study = _studies.get(study_id)
+    if not study:
+        raise HTTPException(404, "Study not found")
+
+    from .feedback import FeedbackRecord, FeedbackStore
+
+    feedback_dir = Path(os.environ.get("LUNG_VIEWER_DIR", "/tmp/lung_viewer")) / "feedback"
+    store = FeedbackStore(feedback_dir)
+
+    recorded = 0
+    for item in payload.corrections:
+        # For manually added nodules use the radiologist values as "AI" values too
+        record = FeedbackRecord(
+            finding_id=item.finding_id,
+            series_uid=item.series_uid or payload.series_uid,
+            patient_id=study.get("patient_id", ""),
+            study_date=study.get("study_date", ""),
+            ai_x=item.ai_x,
+            ai_y=item.ai_y,
+            ai_z=item.ai_z,
+            ai_diameter_mm=item.ai_diameter_mm if not item.is_manual else item.radiologist_diameter_mm,
+            ai_confidence=item.ai_confidence,
+            ai_lung_rads=item.ai_lung_rads,
+            confirmed=item.confirmed,
+            radiologist_diameter_mm=item.radiologist_diameter_mm,
+            radiologist_lung_rads=item.radiologist_lung_rads,
+            radiologist_notes="manual" if item.is_manual else "",
+        )
+        store.add_record(record)
+        recorded += 1
+
+    logger.info("Saved %d correction records for study %s", recorded, study_id)
+    return {"recorded": recorded, "feedback_file": str(store.feedback_file)}
 
 
 @app.get("/api/studies/{study_id}/report")
