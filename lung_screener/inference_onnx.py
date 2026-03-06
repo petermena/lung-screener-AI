@@ -94,6 +94,25 @@ def _build_providers(device_id: int = 0, trt_cache_dir: str | None = None) -> li
     return providers
 
 
+def _probe_max_batch(session) -> int:
+    """Detect whether the ONNX model supports batch sizes > 1.
+
+    Some models are exported with a fixed batch dimension of 1 (no
+    dynamic_axes).  We detect this by inspecting the first input's
+    shape: if the batch axis is a concrete integer (not None / symbolic),
+    we return that value; otherwise we return a large sentinel (64) to
+    allow normal batching.
+    """
+    try:
+        inp = session.get_inputs()[0]
+        batch_dim = inp.shape[0] if inp.shape else None
+        if isinstance(batch_dim, int) and batch_dim > 0:
+            return batch_dim
+    except Exception:
+        pass
+    return 64  # dynamic batch — use the configured batch_size
+
+
 class NoduleDetectorONNX:
     """ONNX Runtime-based nodule detector for offline/lightweight deployment."""
 
@@ -109,7 +128,7 @@ class NoduleDetectorONNX:
         self.preprocessor = CTPreprocessor(config)
 
         inf_config = config.get("inference", {})
-        self.threshold = inf_config.get("threshold", 0.5)
+        self.threshold = inf_config.get("threshold", 0.15)
         self.nms_distance_mm = inf_config.get("nms_distance_mm", 10.0)
         self.batch_size = inf_config.get("batch_size", 64)
 
@@ -149,6 +168,18 @@ class NoduleDetectorONNX:
                 "For CUDA support install: pip install onnxruntime-gpu"
             )
 
+        # Detect the maximum batch size the model supports.
+        # Models exported without dynamic_axes have a fixed batch = 1;
+        # trying to feed a larger batch triggers an ONNX Reshape error.
+        model_max_batch = _probe_max_batch(self.session)
+        if model_max_batch < self.batch_size:
+            logger.info(
+                "ONNX model has fixed batch size %d — "
+                "candidates will be classified one at a time",
+                model_max_batch,
+            )
+            self.batch_size = model_max_batch
+
     def predict_scan(self, image: sitk.Image, series_uid: str = "") -> ScanResult:
         """Run detection pipeline using ONNX model."""
         try:
@@ -180,123 +211,24 @@ class NoduleDetectorONNX:
 
             patches_array = np.stack(patches)[:, np.newaxis, ...].astype(np.float32)
 
-            # Run inference in batches
+            # Run inference in batches.
+            # self.batch_size is already capped to the model's fixed batch size
+            # (1 for models exported without dynamic_axes), so iterating with
+            # step=self.batch_size processes exactly what the model accepts.
             all_probs = []
             for i in range(0, len(patches_array), self.batch_size):
                 batch = patches_array[i : i + self.batch_size]
                 outputs = self.session.run(None, {"input": batch})
                 logits = outputs[0]  # (B, 2)
 
+                # Numerically-stable softmax
                 exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
                 probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
-                all_probs.extend(probs[:, 1])
+                all_probs.extend(probs[:, 1].tolist())
 
             # Build findings
             findings = []
             for cand, prob in zip(candidates, all_probs):
-                if prob >= self.threshold:
-                    center_world = tuple(
-                        o + c * s
-                        for o, c, s in zip(origin, cand["center_voxel"], spacing)
-                    )
-                    wx = center_world[2]
-                    wy = center_world[1]
-                    wz = center_world[0]
-
-                    findings.append(NoduleFinding(
-                        x=wx,
-                        y=wy,
-                        z=wz,
-                        diameter_mm=cand["diameter_mm"],
-                        confidence=float(prob),
-                        lobe=estimate_lobe(wx, wy, wz, z_min, z_max),
-                        image_number=compute_image_number(wz, origin[2], spacing[2]),
-                        series_uid=series_uid,
-                    ))
-
-            findings = self._nms(findings)
-            logger.info(f"Detected {len(findings)} nodules after NMS")
-            return ScanResult(series_uid=series_uid, findings=findings)
-
-        except Exception as e:
-            logger.error(f"Error processing scan: {e}")
-            return ScanResult(
-                series_uid=series_uid,
-                processing_status="error",
-                error_message=str(e),
-            )
-
-    def _nms(self, findings: list[NoduleFinding]) -> list[NoduleFinding]:
-        """Non-maximum suppression based on distance."""
-        if len(findings) <= 1:
-            return findings
-
-        findings = sorted(findings, key=lambda f: f.confidence, reverse=True)
-        keep = []
-
-        for finding in findings:
-            too_close = False
-            for kept in keep:
-                dist = np.sqrt(
-                    (finding.x - kept.x) ** 2
-                    + (finding.y - kept.y) ** 2
-                    + (finding.z - kept.z) ** 2
-                )
-                if dist < self.nms_distance_mm:
-                    too_close = True
-                    break
-            if not too_close:
-                keep.append(finding)
-
-        return keep
-
-
-    def predict_scan(self, image: sitk.Image, series_uid: str = "") -> ScanResult:
-        """Run detection pipeline using ONNX model."""
-        try:
-            processed = self.preprocessor.process_scan(image)
-            volume = processed["volume"]
-            candidates = processed["candidates"]
-            spacing = processed["spacing"]
-            origin = processed["origin"]
-
-            logger.info(f"Found {len(candidates)} candidates in scan")
-
-            # Compute z extent for lobe estimation
-            vol_shape = volume.shape
-            z_min = origin[2]
-            z_max = origin[2] + vol_shape[0] * spacing[2]
-
-            if not candidates:
-                return ScanResult(series_uid=series_uid)
-
-            patch_size = tuple(
-                self.config.get("model", {}).get("patch_size", [48, 48, 48])
-            )
-
-            # Extract patches
-            patches = []
-            for cand in candidates:
-                patch = extract_patch(volume, cand["center_voxel"], patch_size)
-                patches.append(patch)
-
-            patches_array = np.stack(patches)[:, np.newaxis, ...].astype(np.float32)
-
-            # Run inference in batches
-            all_probs = []
-            for i in range(0, len(patches_array), self.batch_size):
-                batch = patches_array[i : i + self.batch_size]
-                outputs = self.session.run(None, {"input": batch})
-                logits = outputs[0]  # (B, 2)
-
-                # Softmax
-                exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
-                probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
-                all_probs.extend(probs[:, 1])
-
-            # Build findings
-            findings = []
-            for idx, (cand, prob) in enumerate(zip(candidates, all_probs)):
                 if prob >= self.threshold:
                     center_world = tuple(
                         o + c * s

@@ -874,6 +874,11 @@ async function displaySlice(idx) {
   if (idx < 0 || idx >= imageIds.length) return;
   currentIndex = idx;
 
+  // Update nav immediately — always shows the correct count even on load failure
+  document.getElementById('slice-slider').value = idx;
+  document.getElementById('slice-info').textContent =
+    `Slice ${idx + 1} / ${imageIds.length}`;
+
   try {
     const image = await cornerstone.loadAndCacheImage(imageIds[idx]);
     cornerstone.displayImage(csEl, image);
@@ -883,12 +888,11 @@ async function displaySlice(idx) {
     if (stackData && stackData.data[0]) {
       stackData.data[0].currentImageIdIndex = idx;
     }
-
-    document.getElementById('slice-slider').value = idx;
-    document.getElementById('slice-info').textContent =
-      `Slice ${idx + 1} / ${imageIds.length}`;
   } catch (e) {
-    console.warn('Failed to load slice', idx, e);
+    console.error('Failed to load slice', idx, e);
+    // Surface the error in the slice counter so it's visible without devtools
+    document.getElementById('slice-info').textContent =
+      `Slice ${idx + 1} / ${imageIds.length} — ERROR: ${e.message}`;
   }
 }
 
