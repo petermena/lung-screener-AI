@@ -1211,7 +1211,8 @@ function drawOverlay() {
 
   findings.forEach((f, idx) => {
     const sliceDiff = Math.abs((f.voxel_z || 0) - currentIndex);
-    if (sliceDiff > 3) return;
+    const maxDiff   = f._manual ? 0 : 3;
+    if (sliceDiff > maxDiff) return;
 
     const canvasPt = cornerstone.pixelToCanvas(csEl, { x: f.voxel_x || 0, y: f.voxel_y || 0 });
     const radiusPx = (f.diameter_mm / 2.0) / rowSpacing * vp.scale;
