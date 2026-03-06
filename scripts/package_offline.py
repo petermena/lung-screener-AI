@@ -85,10 +85,15 @@ def download_wheels(requirements: list[str], dest: Path, platform: str | None = 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.warning(f"Some wheels could not be fetched as binaries:\n{result.stderr}")
-            # Retry without --only-binary (allows sdists for pure-Python packages)
+            # Retry without --only-binary but KEEP --platform so we don't
+            # accidentally download wheels for the build machine's OS.
             cmd_fallback = [sys.executable, "-m", "pip", "download", "--dest", str(dest)]
             if platform:
-                cmd_fallback.extend(["--platform", platform, "--python-version", python_version])
+                cmd_fallback.extend([
+                    "--platform", platform,
+                    "--python-version", python_version,
+                    "--abi", f"cp{python_version}",
+                ])
             cmd_fallback.extend(pkgs)
             subprocess.run(cmd_fallback, check=True)
 
@@ -139,7 +144,7 @@ pip install --upgrade pip setuptools wheel --no-index --find-links "$SCRIPT_DIR/
 pip install --no-index --find-links "$SCRIPT_DIR/wheels" -r "$SCRIPT_DIR/requirements.txt"
 
 # Install the lung_screener package itself
-pip install --no-index --find-links "$SCRIPT_DIR/wheels" lung-screener-ai
+pip install --no-index --find-links "$SCRIPT_DIR/wheels" lung-screener
 
 echo ""
 echo "=== Installation complete ==="
@@ -176,7 +181,7 @@ call "%~dp0venv\\Scripts\\activate.bat"
 echo Installing dependencies from bundled wheels...
 pip install --upgrade pip setuptools wheel --no-index --find-links "%~dp0wheels"
 pip install --no-index --find-links "%~dp0wheels" -r "%~dp0requirements.txt"
-pip install --no-index --find-links "%~dp0wheels" lung-screener-ai
+pip install --no-index --find-links "%~dp0wheels" lung-screener
 
 echo.
 echo === Installation complete ===
