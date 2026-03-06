@@ -828,8 +828,14 @@ async function loadSeriesIntoViewer(seriesArray) {
 
   // Enable cornerstone on element (only once — re-enabling corrupts the render loop)
   if (!csEnabled) {
+    console.log('[DIAG] csEl before enable:', csEl.offsetWidth, 'x', csEl.offsetHeight, 'display:', getComputedStyle(csEl).display);
     cornerstone.enable(csEl);
     csEnabled = true;
+    console.log('[DIAG] csEl after enable:', csEl.offsetWidth, 'x', csEl.offsetHeight);
+    try {
+      const ee = cornerstone.getEnabledElement(csEl);
+      console.log('[DIAG] canvas after enable:', ee.canvas?.width, 'x', ee.canvas?.height);
+    } catch(e) { console.warn('[DIAG] post-enable check failed:', e.message); }
   }
 
   // Register tools once
@@ -881,7 +887,17 @@ async function displaySlice(idx) {
 
   try {
     const image = await cornerstone.loadAndCacheImage(imageIds[idx]);
+    console.log('[DIAG] image loaded', idx, {w: image.width, h: image.height, min: image.minPixelValue, max: image.maxPixelValue, slope: image.slope, intercept: image.intercept, hasGetPixelData: typeof image.getPixelData});
+
     cornerstone.displayImage(csEl, image);
+
+    // Diagnostics: log canvas and viewport state after display
+    try {
+      const ee = cornerstone.getEnabledElement(csEl);
+      console.log('[DIAG] enabledElement canvas:', ee.canvas?.width, 'x', ee.canvas?.height,
+                  'element:', csEl.offsetWidth, 'x', csEl.offsetHeight,
+                  'viewport:', JSON.stringify(ee.viewport?.voi));
+    } catch(de) { console.warn('[DIAG] getEnabledElement failed:', de.message); }
 
     // Sync stack tool state
     const stackData = cornerstoneTools.getToolState(csEl, 'stack');
