@@ -23,7 +23,7 @@ try:
 except ImportError:
     torch = None  # type: ignore[assignment]
     autocast = None  # type: ignore[assignment]
-    _no_grad = lambda f: f  # type: ignore[assignment]  # noqa: E731
+    _no_grad = lambda: (lambda f: f)  # type: ignore[assignment]  # noqa: E731
 
 from .calcification import (
     BENIGN_PATTERNS,
