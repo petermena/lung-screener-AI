@@ -117,7 +117,7 @@ def export_onnx_model(checkpoint: Path, output: Path, project_root: Path):
     export_to_onnx(checkpoint, output, config)
 
 
-def create_install_script(package_dir: Path, mode: str):
+def create_install_script(package_dir: Path, mode: str, python_version: str = "312"):
     """Create the install.sh script for the target machine."""
     script = f"""#!/bin/bash
 set -e
@@ -163,19 +163,21 @@ echo "  lung-screener serve -m $SCRIPT_DIR/model/model.{'onnx' if mode == 'onnx'
     install_path.write_text(script)
     install_path.chmod(0o755)
 
-    # Windows batch file
+    # Windows batch file — derive "3.12" from "312"
+    py_ver_dot = f"{python_version[:-2]}.{python_version[-2:]}" if len(python_version) == 3 else python_version
     bat_script = f"""@echo off
 echo === Lung Screener AI - Offline Installer ===
 echo.
 
-python -c "import sys; assert sys.version_info >= (3, 10)" 2>NUL
+py -{py_ver_dot} -c "import sys" 2>NUL
 if errorlevel 1 (
-    echo ERROR: Python 3.10 or later is required.
+    echo ERROR: Python {py_ver_dot} is required but not found.
+    echo Install it from https://www.python.org/downloads/ then re-run this script.
     exit /b 1
 )
 
-echo Creating virtual environment...
-python -m venv "%~dp0venv"
+echo Creating virtual environment with Python {py_ver_dot}...
+py -{py_ver_dot} -m venv "%~dp0venv"
 call "%~dp0venv\\Scripts\\activate.bat"
 
 echo Installing dependencies from bundled wheels...
@@ -281,7 +283,7 @@ def main():
 
     # 6. Create install scripts
     logger.info("--- Step 5: Creating install scripts ---")
-    create_install_script(package_dir, mode)
+    create_install_script(package_dir, mode, args.python_version)
 
     # 7. Create archive
     logger.info("--- Step 6: Creating archive ---")
