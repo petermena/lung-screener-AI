@@ -71,36 +71,36 @@ def download_wheels(requirements: list[str], dest: Path, platform: str | None = 
     # Always download build tools so lung_screener_pkg can be installed offline
     build_tools = ["setuptools>=68.0", "wheel>=0.40", "pip>=23.0"]
 
-    def _download(pkgs: list[str], extra_flags: list[str] | None = None):
+    # pip requires --only-binary :all: whenever --platform is set.
+    # Download each package individually so one failure doesn't abort the rest.
+    def _download_one(pkg: str):
         cmd = [
             sys.executable, "-m", "pip", "download",
             "--dest", str(dest),
             "--only-binary", ":all:",
         ]
         if platform:
-            cmd.extend(["--platform", platform, "--python-version", python_version])
-        if extra_flags:
-            cmd.extend(extra_flags)
-        cmd.extend(pkgs)
+            cmd.extend([
+                "--platform", platform,
+                "--python-version", python_version,
+                "--abi", f"cp{python_version}",
+            ])
+        cmd.append(pkg)
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            logger.warning(f"Some wheels could not be fetched as binaries:\n{result.stderr}")
-            # Retry without --only-binary but KEEP --platform so we don't
-            # accidentally download wheels for the build machine's OS.
-            cmd_fallback = [sys.executable, "-m", "pip", "download", "--dest", str(dest)]
-            if platform:
-                cmd_fallback.extend([
-                    "--platform", platform,
-                    "--python-version", python_version,
-                    "--abi", f"cp{python_version}",
-                ])
-            cmd_fallback.extend(pkgs)
-            subprocess.run(cmd_fallback, check=True)
+            # Pure-Python packages (py3-none-any) may need a second attempt
+            # without ABI/platform restriction — they work on any platform.
+            cmd2 = [sys.executable, "-m", "pip", "download", "--dest", str(dest),
+                    "--only-binary", ":all:", pkg]
+            result2 = subprocess.run(cmd2, capture_output=True, text=True)
+            if result2.returncode != 0:
+                logger.error(f"Failed to download {pkg}:\n{result.stderr}\n{result2.stderr}")
+                raise RuntimeError(f"Could not download wheel for: {pkg}")
 
     logger.info(f"Downloading wheels to {dest}...")
-    _download(requirements)
-    logger.info("Downloading build tools (setuptools, wheel, pip)...")
-    _download(build_tools)
+    for pkg in requirements + build_tools:
+        logger.info(f"  {pkg}")
+        _download_one(pkg)
 
 
 def export_onnx_model(checkpoint: Path, output: Path, project_root: Path):
@@ -144,7 +144,7 @@ pip install --upgrade pip setuptools wheel --no-index --find-links "$SCRIPT_DIR/
 pip install --no-index --find-links "$SCRIPT_DIR/wheels" -r "$SCRIPT_DIR/requirements.txt"
 
 # Install the lung_screener package itself
-pip install --no-index --find-links "$SCRIPT_DIR/wheels" lung-screener
+pip install --no-index --find-links "$SCRIPT_DIR/wheels" --no-deps lung-screener
 
 echo ""
 echo "=== Installation complete ==="
@@ -181,7 +181,7 @@ call "%~dp0venv\\Scripts\\activate.bat"
 echo Installing dependencies from bundled wheels...
 pip install --upgrade pip setuptools wheel --no-index --find-links "%~dp0wheels"
 pip install --no-index --find-links "%~dp0wheels" -r "%~dp0requirements.txt"
-pip install --no-index --find-links "%~dp0wheels" lung-screener
+pip install --no-index --find-links "%~dp0wheels" --no-deps lung-screener
 
 echo.
 echo === Installation complete ===
