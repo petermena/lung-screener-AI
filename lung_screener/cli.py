@@ -1294,10 +1294,14 @@ def viewer(ctx, checkpoint, host, port, upload_dir):
     config = ctx.obj["config"]
 
     # Load the detector before starting the server so the first upload is fast
-    click.echo(f"Loading model from {checkpoint} …")
-    from lung_screener.inference import NoduleDetector
-
-    api_module._detector = NoduleDetector(config, model_path=checkpoint)
+    checkpoint_path = Path(checkpoint)
+    click.echo(f"Loading model from {checkpoint_path} …")
+    if checkpoint_path.suffix == ".onnx":
+        from lung_screener.inference_onnx import NoduleDetectorONNX
+        api_module._detector = NoduleDetectorONNX(config, onnx_path=checkpoint_path)
+    else:
+        from lung_screener.inference import NoduleDetector
+        api_module._detector = NoduleDetector(config, model_path=checkpoint_path)
 
     upload_path = Path(upload_dir)
     upload_path.mkdir(parents=True, exist_ok=True)
