@@ -571,7 +571,8 @@ cornerstoneWADOImageLoader.configure({ useWebWorkers: false });
 
 cornerstoneTools.external.cornerstone     = cornerstone;
 cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
-cornerstoneTools.init({ showSVGCursors: true });
+// touchEnabled:false skips Hammer.js entirely (not bundled); mouse input is sufficient.
+cornerstoneTools.init({ mouseEnabled: true, touchEnabled: false, showSVGCursors: false });
 
 // ── CUSTOM RAW-SLICE IMAGE LOADER ────────────────────────────────────────────
 // Bypasses cornerstoneWADOImageLoader entirely.  The backend serves a compact
