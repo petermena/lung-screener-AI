@@ -16,8 +16,12 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
-import torch
-from torch.cuda.amp import autocast
+try:
+    import torch
+    from torch.cuda.amp import autocast
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    autocast = None  # type: ignore[assignment]
 
 from .calcification import (
     BENIGN_PATTERNS,
