@@ -11,6 +11,7 @@ import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -215,7 +216,12 @@ async def list_series(study_id: str):
 
 @app.get("/api/studies/{study_id}/dicom/{filename:path}")
 async def get_dicom_file(study_id: str, filename: str):
-    """Serve a raw DICOM file for cornerstoneWADOImageLoader."""
+    """Serve a DICOM file for cornerstoneWADOImageLoader.
+
+    Normalises the file to Explicit VR Little Endian (uncompressed) so that
+    the browser-side WADO loader can always decode it, regardless of the
+    original transfer syntax.  Falls back to raw bytes on any error.
+    """
     study = _studies.get(study_id)
     if not study:
         raise HTTPException(404, "Study not found")
@@ -232,4 +238,54 @@ async def get_dicom_file(study_id: str, filename: str):
     if not file_path.exists():
         raise HTTPException(404, "File not found")
 
-    return Response(content=file_path.read_bytes(), media_type="application/dicom")
+    raw = file_path.read_bytes()
+    normalised = _normalise_dicom(raw)
+    return Response(content=normalised, media_type="application/dicom")
+
+
+# Transfer syntaxes that cornerstoneWADOImageLoader handles natively
+_UNCOMPRESSED_TS = {
+    "1.2.840.10008.1.2",    # Implicit VR Little Endian
+    "1.2.840.10008.1.2.1",  # Explicit VR Little Endian
+    "1.2.840.10008.1.2.2",  # Explicit VR Big Endian (rare but parseable)
+}
+
+
+def _normalise_dicom(raw: bytes) -> bytes:
+    """Convert *raw* DICOM bytes to Explicit VR Little Endian (uncompressed).
+
+    If the file is already uncompressed or if conversion fails, the original
+    bytes are returned unchanged so the browser still has something to try.
+    """
+    try:
+        ds = pydicom.dcmread(BytesIO(raw))
+        ts = getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", None)
+
+        # Already in a format the WADO loader can handle – serve as-is
+        if ts is None or str(ts) in _UNCOMPRESSED_TS:
+            return raw
+
+        # Compressed transfer syntax: decompress via pixel_array then rewrite
+        arr = ds.pixel_array  # triggers decompression; shape (rows, cols) or (frames, rows, cols)
+
+        # Flatten to 2-D for single-frame files
+        if arr.ndim == 3 and arr.shape[0] == 1:
+            arr = arr[0]
+
+        ds.PixelData = arr.tobytes()
+        ds.is_implicit_VR = False
+        ds.is_little_endian = True
+
+        if not hasattr(ds, "file_meta") or ds.file_meta is None:
+            ds.file_meta = pydicom.dataset.FileMetaDataset()
+        ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+        ds.file_meta.MediaStorageSOPClassUID = getattr(ds, "SOPClassUID", "1.2.840.10008.5.1.4.1.1.2")
+        ds.file_meta.MediaStorageSOPInstanceUID = getattr(ds, "SOPInstanceUID", pydicom.uid.generate_uid())
+
+        buf = BytesIO()
+        pydicom.dcmwrite(buf, ds)
+        return buf.getvalue()
+
+    except Exception:
+        logger.debug("DICOM normalisation failed, serving raw bytes", exc_info=True)
+        return raw

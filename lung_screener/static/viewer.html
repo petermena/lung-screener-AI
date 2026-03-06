@@ -582,6 +582,7 @@ let currentIndex     = 0;
 let findings         = [];
 let pollingTimer     = null;
 let toolsRegistered  = false;
+let csEnabled        = false;
 
 // ── DOM REFS ─────────────────────────────────────────────────────────────────
 
@@ -751,8 +752,11 @@ async function loadSeriesIntoViewer(seriesArray) {
   slider.max   = imageIds.length - 1;
   slider.value = 0;
 
-  // Enable cornerstone on element
-  cornerstone.enable(csEl);
+  // Enable cornerstone on element (only once — re-enabling corrupts the render loop)
+  if (!csEnabled) {
+    cornerstone.enable(csEl);
+    csEnabled = true;
+  }
 
   // Register tools once
   if (!toolsRegistered) {
@@ -777,11 +781,19 @@ async function loadSeriesIntoViewer(seriesArray) {
   cornerstoneTools.setToolPassive('Zoom');
   cornerstoneTools.setToolPassive('Length');
 
-  // Listen for renders to keep overlay in sync
+  // Listen for renders to keep overlay in sync (guard against duplicate listeners)
+  csEl.removeEventListener('cornerstoneimagerendered', onImageRendered);
   csEl.addEventListener('cornerstoneimagerendered', onImageRendered);
 
   await displaySlice(0);
-  setPreset('lung');
+
+  // After the browser has painted, force a resize so the viewport scale is
+  // recomputed from the correct canvas dimensions.  Without this, if the canvas
+  // was zero-sized when cornerstone.enable() ran, scale stays 0 → black image.
+  requestAnimationFrame(() => {
+    cornerstone.resize(csEl, true);   // forceFitToWindow = true → calls fitToWindow
+    setPreset('lung');
+  });
 }
 
 async function displaySlice(idx) {
@@ -976,7 +988,11 @@ function drawOverlay() {
 }
 
 document.getElementById('show-nodules').addEventListener('change', drawOverlay);
-window.addEventListener('resize', () => { resizeOverlay(); drawOverlay(); });
+window.addEventListener('resize', () => {
+  if (csEnabled) cornerstone.resize(csEl, true);
+  resizeOverlay();
+  drawOverlay();
+});
 
 // ── FINDINGS PANEL ────────────────────────────────────────────────────────────
 
