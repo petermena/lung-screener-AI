@@ -48,6 +48,7 @@ ONNX_REQUIREMENTS = [
     "SimpleITK>=2.3",
     "pyyaml>=6.0",
     "click>=8.1",
+    "colorama>=0.4",  # Windows dependency of click; not auto-downloaded on Linux build hosts
 ] + VIEWER_REQUIREMENTS
 
 # Full requirements (includes PyTorch)
@@ -67,26 +68,40 @@ FULL_REQUIREMENTS = [
 def download_wheels(requirements: list[str], dest: Path, platform: str | None = None, python_version: str = "310"):
     """Download wheel files for all dependencies."""
     dest.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable, "-m", "pip", "download",
-        "--dest", str(dest),
-        "--only-binary", ":all:",
-    ]
-    if platform:
-        cmd.extend(["--platform", platform, "--python-version", python_version])
-    cmd.extend(requirements)
 
-    logger.info(f"Downloading wheels to {dest}...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        logger.warning(f"Some wheels may need building from source:\n{result.stderr}")
-        # Retry without --only-binary
-        cmd_fallback = [
+    # Always download build tools so lung_screener_pkg can be installed offline
+    build_tools = ["setuptools>=68.0", "wheel>=0.40", "pip>=23.0"]
+
+    # pip requires --only-binary :all: whenever --platform is set.
+    # Download each package individually so one failure doesn't abort the rest.
+    def _download_one(pkg: str):
+        cmd = [
             sys.executable, "-m", "pip", "download",
             "--dest", str(dest),
+            "--only-binary", ":all:",
         ]
-        cmd_fallback.extend(requirements)
-        subprocess.run(cmd_fallback, check=True)
+        if platform:
+            cmd.extend([
+                "--platform", platform,
+                "--python-version", python_version,
+                "--abi", f"cp{python_version}",
+            ])
+        cmd.append(pkg)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            # Pure-Python packages (py3-none-any) may need a second attempt
+            # without ABI/platform restriction — they work on any platform.
+            cmd2 = [sys.executable, "-m", "pip", "download", "--dest", str(dest),
+                    "--only-binary", ":all:", pkg]
+            result2 = subprocess.run(cmd2, capture_output=True, text=True)
+            if result2.returncode != 0:
+                logger.error(f"Failed to download {pkg}:\n{result.stderr}\n{result2.stderr}")
+                raise RuntimeError(f"Could not download wheel for: {pkg}")
+
+    logger.info(f"Downloading wheels to {dest}...")
+    for pkg in requirements + build_tools:
+        logger.info(f"  {pkg}")
+        _download_one(pkg)
 
 
 def export_onnx_model(checkpoint: Path, output: Path, project_root: Path):
@@ -103,7 +118,7 @@ def export_onnx_model(checkpoint: Path, output: Path, project_root: Path):
     export_to_onnx(checkpoint, output, config)
 
 
-def create_install_script(package_dir: Path, mode: str):
+def create_install_script(package_dir: Path, mode: str, python_version: str = "312"):
     """Create the install.sh script for the target machine."""
     script = f"""#!/bin/bash
 set -e
@@ -126,11 +141,11 @@ source "$SCRIPT_DIR/venv/bin/activate"
 
 # Install from local wheels (no internet needed)
 echo "Installing dependencies from bundled wheels..."
-pip install --upgrade pip --no-index --find-links "$SCRIPT_DIR/wheels" 2>/dev/null || pip install --upgrade pip
+pip install --upgrade pip setuptools wheel --no-index --find-links "$SCRIPT_DIR/wheels"
 pip install --no-index --find-links "$SCRIPT_DIR/wheels" -r "$SCRIPT_DIR/requirements.txt"
 
 # Install the lung_screener package itself
-pip install --no-index --find-links "$SCRIPT_DIR/wheels" "$SCRIPT_DIR/lung_screener_pkg/"
+pip install --no-index --find-links "$SCRIPT_DIR/wheels" --no-deps lung-screener
 
 echo ""
 echo "=== Installation complete ==="
@@ -149,25 +164,27 @@ echo "  lung-screener serve -m $SCRIPT_DIR/model/model.{'onnx' if mode == 'onnx'
     install_path.write_text(script)
     install_path.chmod(0o755)
 
-    # Windows batch file
+    # Windows batch file — derive "3.12" from "312"
+    py_ver_dot = f"{python_version[:-2]}.{python_version[-2:]}" if len(python_version) == 3 else python_version
     bat_script = f"""@echo off
 echo === Lung Screener AI - Offline Installer ===
 echo.
 
-python -c "import sys; assert sys.version_info >= (3, 10)" 2>NUL
+py -{py_ver_dot} -c "import sys" 2>NUL
 if errorlevel 1 (
-    echo ERROR: Python 3.10 or later is required.
+    echo ERROR: Python {py_ver_dot} is required but not found.
+    echo Install it from https://www.python.org/downloads/ then re-run this script.
     exit /b 1
 )
 
-echo Creating virtual environment...
-python -m venv "%~dp0venv"
+echo Creating virtual environment with Python {py_ver_dot}...
+py -{py_ver_dot} -m venv "%~dp0venv"
 call "%~dp0venv\\Scripts\\activate.bat"
 
 echo Installing dependencies from bundled wheels...
-pip install --upgrade pip --no-index --find-links "%~dp0wheels" 2>NUL || pip install --upgrade pip
+pip install --upgrade pip setuptools wheel --no-index --find-links "%~dp0wheels"
 pip install --no-index --find-links "%~dp0wheels" -r "%~dp0requirements.txt"
-pip install --no-index --find-links "%~dp0wheels" "%~dp0lung_screener_pkg\\"
+pip install --no-index --find-links "%~dp0wheels" --no-deps lung-screener
 
 echo.
 echo === Installation complete ===
@@ -244,14 +261,19 @@ def main():
     logger.info("--- Step 2: Downloading dependency wheels ---")
     download_wheels(requirements, package_dir / "wheels", args.platform, args.python_version)
 
-    # 3. Copy source package
-    logger.info("--- Step 3: Copying lung_screener package ---")
-    src_dir = project_root / "lung_screener"
-    dest_dir = package_dir / "lung_screener_pkg" / "lung_screener"
-    shutil.copytree(src_dir, dest_dir)
-    shutil.copy2(project_root / "pyproject.toml", package_dir / "lung_screener_pkg" / "pyproject.toml")
+    # 3. Build lung_screener as a wheel and place it in the wheels directory
+    logger.info("--- Step 3: Building lung_screener wheel ---")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "wheel", "--no-deps", "--wheel-dir", tmp, str(project_root)],
+            check=True,
+        )
+        for whl in Path(tmp).glob("*.whl"):
+            shutil.copy2(whl, package_dir / "wheels" / whl.name)
+            logger.info(f"  Built: {whl.name}")
 
-    # 4. Copy config
+    # 4. Copy config (still needed at runtime for model defaults)
     logger.info("--- Step 4: Copying configuration ---")
     config_dest = package_dir / "lung_screener_pkg" / "config"
     shutil.copytree(project_root / "config", config_dest)
@@ -262,7 +284,7 @@ def main():
 
     # 6. Create install scripts
     logger.info("--- Step 5: Creating install scripts ---")
-    create_install_script(package_dir, mode)
+    create_install_script(package_dir, mode, args.python_version)
 
     # 7. Create archive
     logger.info("--- Step 6: Creating archive ---")

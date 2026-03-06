@@ -7,13 +7,16 @@ The FastAPI app is started by the ``viewer`` CLI command.
 import asyncio
 import logging
 import os
+import struct
 import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pydicom
 import SimpleITK as sitk
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
@@ -215,7 +218,12 @@ async def list_series(study_id: str):
 
 @app.get("/api/studies/{study_id}/dicom/{filename:path}")
 async def get_dicom_file(study_id: str, filename: str):
-    """Serve a raw DICOM file for cornerstoneWADOImageLoader."""
+    """Serve a DICOM file for cornerstoneWADOImageLoader.
+
+    Normalises the file to Explicit VR Little Endian (uncompressed) so that
+    the browser-side WADO loader can always decode it, regardless of the
+    original transfer syntax.  Falls back to raw bytes on any error.
+    """
     study = _studies.get(study_id)
     if not study:
         raise HTTPException(404, "Study not found")
@@ -232,4 +240,150 @@ async def get_dicom_file(study_id: str, filename: str):
     if not file_path.exists():
         raise HTTPException(404, "File not found")
 
-    return Response(content=file_path.read_bytes(), media_type="application/dicom")
+    raw = file_path.read_bytes()
+    normalised = _normalise_dicom(raw)
+    return Response(content=normalised, media_type="application/dicom")
+
+
+@app.get("/api/studies/{study_id}/slice/{filename:path}")
+async def get_slice_raw(study_id: str, filename: str):
+    """Serve raw pixel data for a single DICOM slice.
+
+    Response is a compact binary blob that the custom ``rawslice:`` Cornerstone
+    image loader in the viewer can decode directly — no browser-side DICOM
+    parsing needed.  This bypasses all WADO/dicomParser compatibility issues.
+
+    Binary layout (32-byte header + pixel data):
+      Bytes  0- 3  width          uint32 LE
+      Bytes  4- 7  height         uint32 LE
+      Bytes  8-11  minPixelValue  int32  LE
+      Bytes 12-15  maxPixelValue  int32  LE
+      Bytes 16-19  intercept      float32 LE
+      Bytes 20-23  slope          float32 LE
+      Bytes 24-27  rowSpacing     float32 LE
+      Bytes 28-31  colSpacing     float32 LE
+      Bytes 32+    int16 pixel values, row-major, little endian
+    """
+    study = _studies.get(study_id)
+    if not study:
+        raise HTTPException(404, "Study not found")
+
+    dicom_dir = Path(study["dicom_dir"])
+    file_path = (dicom_dir / filename).resolve()
+
+    try:
+        file_path.relative_to(dicom_dir.resolve())
+    except ValueError:
+        raise HTTPException(403, "Forbidden")
+
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+
+    pixel_arr, meta = _read_dicom_pixels(file_path)
+
+    header = struct.pack(
+        "<IIiiffff",
+        meta["width"],
+        meta["height"],
+        meta["min_pixel"],
+        meta["max_pixel"],
+        meta["intercept"],
+        meta["slope"],
+        meta["row_spacing"],
+        meta["col_spacing"],
+    )
+    pixel_bytes = pixel_arr.astype("<i2").tobytes()
+    return Response(
+        content=header + pixel_bytes,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+def _read_dicom_pixels(file_path: Path) -> tuple[np.ndarray, dict]:
+    """Return (int16 pixel array, metadata dict) for a single DICOM file.
+
+    Tries pydicom first; falls back to SimpleITK for compressed formats.
+    """
+    try:
+        ds = pydicom.dcmread(str(file_path))
+        arr = ds.pixel_array.astype(np.int16)
+        spacing = getattr(ds, "PixelSpacing", [1.0, 1.0])
+        return arr, {
+            "width": int(ds.Columns),
+            "height": int(ds.Rows),
+            "min_pixel": int(arr.min()),
+            "max_pixel": int(arr.max()),
+            "intercept": float(getattr(ds, "RescaleIntercept", 0)),
+            "slope": float(getattr(ds, "RescaleSlope", 1)),
+            "row_spacing": float(spacing[0]),
+            "col_spacing": float(spacing[1]),
+        }
+    except Exception:
+        pass
+
+    # Fallback: SimpleITK handles all compressed transfer syntaxes
+    img = sitk.ReadImage(str(file_path))
+    arr = sitk.GetArrayFromImage(img)
+    if arr.ndim == 3:
+        arr = arr[0]
+    arr = arr.astype(np.int16)
+    sp = img.GetSpacing()  # (x, y, z)
+    return arr, {
+        "width": arr.shape[1],
+        "height": arr.shape[0],
+        "min_pixel": int(arr.min()),
+        "max_pixel": int(arr.max()),
+        "intercept": 0.0,
+        "slope": 1.0,
+        "row_spacing": float(sp[1]),
+        "col_spacing": float(sp[0]),
+    }
+
+
+# Transfer syntaxes that cornerstoneWADOImageLoader handles natively
+_UNCOMPRESSED_TS = {
+    "1.2.840.10008.1.2",    # Implicit VR Little Endian
+    "1.2.840.10008.1.2.1",  # Explicit VR Little Endian
+    "1.2.840.10008.1.2.2",  # Explicit VR Big Endian (rare but parseable)
+}
+
+
+def _normalise_dicom(raw: bytes) -> bytes:
+    """Convert *raw* DICOM bytes to Explicit VR Little Endian (uncompressed).
+
+    If the file is already uncompressed or if conversion fails, the original
+    bytes are returned unchanged so the browser still has something to try.
+    """
+    try:
+        ds = pydicom.dcmread(BytesIO(raw))
+        ts = getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", None)
+
+        # Already in a format the WADO loader can handle – serve as-is
+        if ts is None or str(ts) in _UNCOMPRESSED_TS:
+            return raw
+
+        # Compressed transfer syntax: decompress via pixel_array then rewrite
+        arr = ds.pixel_array  # triggers decompression; shape (rows, cols) or (frames, rows, cols)
+
+        # Flatten to 2-D for single-frame files
+        if arr.ndim == 3 and arr.shape[0] == 1:
+            arr = arr[0]
+
+        ds.PixelData = arr.tobytes()
+        ds.is_implicit_VR = False
+        ds.is_little_endian = True
+
+        if not hasattr(ds, "file_meta") or ds.file_meta is None:
+            ds.file_meta = pydicom.dataset.FileMetaDataset()
+        ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+        ds.file_meta.MediaStorageSOPClassUID = getattr(ds, "SOPClassUID", "1.2.840.10008.5.1.4.1.1.2")
+        ds.file_meta.MediaStorageSOPInstanceUID = getattr(ds, "SOPInstanceUID", pydicom.uid.generate_uid())
+
+        buf = BytesIO()
+        pydicom.dcmwrite(buf, ds)
+        return buf.getvalue()
+
+    except Exception:
+        logger.debug("DICOM normalisation failed, serving raw bytes", exc_info=True)
+        return raw

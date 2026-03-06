@@ -16,19 +16,27 @@ from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
-import torch
-from torch.cuda.amp import autocast
+try:
+    import torch
+    from torch.cuda.amp import autocast
+    _no_grad = torch.no_grad
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    autocast = None  # type: ignore[assignment]
+    _no_grad = lambda: (lambda f: f)  # type: ignore[assignment]  # noqa: E731
 
 from .calcification import (
     BENIGN_PATTERNS,
     CalcificationResult,
     analyze_calcification,
 )
-from .model import NODULE_TYPES, build_model
 from .preprocessing import CTPreprocessor, extract_patch
 from .risk_model import compute_lung_rads_with_risk
 
 logger = logging.getLogger(__name__)
+
+# Duplicated from model.py to avoid importing torch at module level
+NODULE_TYPES = ["solid", "part_solid", "ground_glass"]
 
 
 @dataclass
@@ -380,6 +388,7 @@ class NoduleDetector:
         model_path: str | Path | None = None,
         device: str | None = None,
     ):
+        from .model import build_model
         self.config = config
         self.device = torch.device(
             device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -410,7 +419,7 @@ class NoduleDetector:
             self.model = build_model(config).to(self.device)
         self.model.eval()
 
-    @torch.no_grad()
+    @_no_grad()
     def predict_scan(self, image: sitk.Image, series_uid: str = "") -> ScanResult:
         """Run full detection pipeline on a CT scan.
 
@@ -555,7 +564,7 @@ class NoduleDetector:
                 error_message=str(e),
             )
 
-    @torch.no_grad()
+    @_no_grad()
     def _classify_with_tta(
         self, patches_array: np.ndarray
     ) -> tuple[list[float], list[float], list[int]]:

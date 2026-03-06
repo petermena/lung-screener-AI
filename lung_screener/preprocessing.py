@@ -219,8 +219,8 @@ def extract_candidates(
     threshold = 0.4  # Corresponds to roughly -480 HU in default window
     candidates_mask = masked > threshold
 
-    # Remove very small noise
-    candidates_mask = morphology.remove_small_objects(candidates_mask, max_size=10)
+    # Remove very small noise (min_size removes objects SMALLER than this threshold)
+    candidates_mask = morphology.remove_small_objects(candidates_mask, min_size=10)
 
     labels = measure.label(candidates_mask)
     regions = measure.regionprops(labels)
