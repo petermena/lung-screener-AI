@@ -7,6 +7,7 @@ The FastAPI app is started by the ``viewer`` CLI command.
 import asyncio
 import logging
 import os
+import struct
 import time
 import uuid
 import zipfile
@@ -15,6 +16,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pydicom
 import SimpleITK as sitk
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
@@ -241,6 +243,102 @@ async def get_dicom_file(study_id: str, filename: str):
     raw = file_path.read_bytes()
     normalised = _normalise_dicom(raw)
     return Response(content=normalised, media_type="application/dicom")
+
+
+@app.get("/api/studies/{study_id}/slice/{filename:path}")
+async def get_slice_raw(study_id: str, filename: str):
+    """Serve raw pixel data for a single DICOM slice.
+
+    Response is a compact binary blob that the custom ``rawslice:`` Cornerstone
+    image loader in the viewer can decode directly — no browser-side DICOM
+    parsing needed.  This bypasses all WADO/dicomParser compatibility issues.
+
+    Binary layout (32-byte header + pixel data):
+      Bytes  0- 3  width          uint32 LE
+      Bytes  4- 7  height         uint32 LE
+      Bytes  8-11  minPixelValue  int32  LE
+      Bytes 12-15  maxPixelValue  int32  LE
+      Bytes 16-19  intercept      float32 LE
+      Bytes 20-23  slope          float32 LE
+      Bytes 24-27  rowSpacing     float32 LE
+      Bytes 28-31  colSpacing     float32 LE
+      Bytes 32+    int16 pixel values, row-major, little endian
+    """
+    study = _studies.get(study_id)
+    if not study:
+        raise HTTPException(404, "Study not found")
+
+    dicom_dir = Path(study["dicom_dir"])
+    file_path = (dicom_dir / filename).resolve()
+
+    try:
+        file_path.relative_to(dicom_dir.resolve())
+    except ValueError:
+        raise HTTPException(403, "Forbidden")
+
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+
+    pixel_arr, meta = _read_dicom_pixels(file_path)
+
+    header = struct.pack(
+        "<IIiiffff",
+        meta["width"],
+        meta["height"],
+        meta["min_pixel"],
+        meta["max_pixel"],
+        meta["intercept"],
+        meta["slope"],
+        meta["row_spacing"],
+        meta["col_spacing"],
+    )
+    pixel_bytes = pixel_arr.astype("<i2").tobytes()
+    return Response(
+        content=header + pixel_bytes,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+def _read_dicom_pixels(file_path: Path) -> tuple[np.ndarray, dict]:
+    """Return (int16 pixel array, metadata dict) for a single DICOM file.
+
+    Tries pydicom first; falls back to SimpleITK for compressed formats.
+    """
+    try:
+        ds = pydicom.dcmread(str(file_path))
+        arr = ds.pixel_array.astype(np.int16)
+        spacing = getattr(ds, "PixelSpacing", [1.0, 1.0])
+        return arr, {
+            "width": int(ds.Columns),
+            "height": int(ds.Rows),
+            "min_pixel": int(arr.min()),
+            "max_pixel": int(arr.max()),
+            "intercept": float(getattr(ds, "RescaleIntercept", 0)),
+            "slope": float(getattr(ds, "RescaleSlope", 1)),
+            "row_spacing": float(spacing[0]),
+            "col_spacing": float(spacing[1]),
+        }
+    except Exception:
+        pass
+
+    # Fallback: SimpleITK handles all compressed transfer syntaxes
+    img = sitk.ReadImage(str(file_path))
+    arr = sitk.GetArrayFromImage(img)
+    if arr.ndim == 3:
+        arr = arr[0]
+    arr = arr.astype(np.int16)
+    sp = img.GetSpacing()  # (x, y, z)
+    return arr, {
+        "width": arr.shape[1],
+        "height": arr.shape[0],
+        "min_pixel": int(arr.min()),
+        "max_pixel": int(arr.max()),
+        "intercept": 0.0,
+        "slope": 1.0,
+        "row_spacing": float(sp[1]),
+        "col_spacing": float(sp[0]),
+    }
 
 
 # Transfer syntaxes that cornerstoneWADOImageLoader handles natively

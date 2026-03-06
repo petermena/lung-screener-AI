@@ -573,6 +573,77 @@ cornerstoneTools.external.cornerstone     = cornerstone;
 cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
 cornerstoneTools.init({ showSVGCursors: true });
 
+// ── CUSTOM RAW-SLICE IMAGE LOADER ────────────────────────────────────────────
+// Bypasses cornerstoneWADOImageLoader entirely.  The backend serves a compact
+// binary blob (32-byte header + int16 pixel data); we decode it here and hand
+// a fully-formed Cornerstone image object back to the rendering pipeline.
+//
+// Header layout (little-endian):
+//   0- 3  width          uint32
+//   4- 7  height         uint32
+//   8-11  minPixelValue  int32
+//  12-15  maxPixelValue  int32
+//  16-19  intercept      float32
+//  20-23  slope          float32
+//  24-27  rowSpacing     float32
+//  28-31  colSpacing     float32
+//  32+    int16 pixel values (row-major)
+
+const _RAW_HEADER_BYTES = 32;
+
+function _rawSliceLoader(imageId) {
+  const url = imageId.replace(/^rawslice:/, '');
+  const ctrl = new AbortController();
+
+  const promise = fetch(url, { signal: ctrl.signal })
+    .then(r => {
+      if (!r.ok) throw new Error(`Slice fetch failed: HTTP ${r.status} for ${url}`);
+      return r.arrayBuffer();
+    })
+    .then(buf => {
+      const v = new DataView(buf);
+      const width      = v.getUint32(0,  true);
+      const height     = v.getUint32(4,  true);
+      const minPx      = v.getInt32( 8,  true);
+      const maxPx      = v.getInt32( 12, true);
+      const intercept  = v.getFloat32(16, true);
+      const slope      = v.getFloat32(20, true);
+      const rowSpacing = v.getFloat32(24, true);
+      const colSpacing = v.getFloat32(28, true);
+
+      // Copy into a fresh buffer so the pixelData array owns its memory
+      const pixelCount = width * height;
+      const pixelBuf   = buf.slice(_RAW_HEADER_BYTES, _RAW_HEADER_BYTES + pixelCount * 2);
+      const pixelData  = new Int16Array(pixelBuf);
+
+      return {
+        imageId,
+        minPixelValue:      minPx,
+        maxPixelValue:      maxPx,
+        slope,
+        intercept,
+        windowWidth:        1500,
+        windowCenter:       -600,
+        getPixelData:       () => pixelData,
+        rows:               height,
+        columns:            width,
+        height,
+        width,
+        color:              false,
+        rgba:               false,
+        columnPixelSpacing: colSpacing || 1,
+        rowPixelSpacing:    rowSpacing || 1,
+        sizeInBytes:        pixelCount * 2,
+        invert:             false,
+        stats:              {},
+      };
+    });
+
+  return { promise, cancelFn: () => ctrl.abort() };
+}
+
+cornerstone.registerImageLoader('rawslice', _rawSliceLoader);
+
 // ── STATE ────────────────────────────────────────────────────────────────────
 
 let currentStudyId   = null;
@@ -736,8 +807,11 @@ async function loadSeriesIntoViewer(seriesArray) {
   if (!series || !series.instances.length) return;
   currentSeriesUid = series.series_uid;
 
+  // Use the custom rawslice: loader which bypasses cornerstoneWADOImageLoader.
+  // The backend endpoint returns a simple binary blob the loader decodes directly,
+  // so DICOM transfer-syntax compatibility issues in the browser are irrelevant.
   imageIds = series.instances.map(inst =>
-    `wadouri:/api/studies/${currentStudyId}/dicom/${encodeURIComponent(inst.filename)}`
+    `rawslice:/api/studies/${currentStudyId}/slice/${encodeURIComponent(inst.filename)}`
   );
 
   // Reveal viewport elements
