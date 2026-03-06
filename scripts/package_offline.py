@@ -195,6 +195,10 @@ def main():
         help="Include full PyTorch (larger package, GPU support)",
     )
     parser.add_argument(
+        "--onnx-gpu", action="store_true",
+        help="ONNX mode: use onnxruntime-gpu instead of onnxruntime (CUDA GPU support)",
+    )
+    parser.add_argument(
         "--platform", type=str, default=None,
         help="Target platform for wheels (e.g., manylinux2014_x86_64, win_amd64, macosx_11_0_x86_64)",
     )
@@ -220,7 +224,14 @@ def main():
             package_dir / "model" / "model.onnx",
             project_root,
         )
-        requirements = ONNX_REQUIREMENTS
+        requirements = ONNX_REQUIREMENTS.copy()
+        if args.onnx_gpu:
+            # Replace CPU-only onnxruntime with the GPU-enabled build
+            requirements = [
+                "onnxruntime-gpu>=1.16" if r == "onnxruntime>=1.16" else r
+                for r in requirements
+            ]
+            logger.info("ONNX GPU mode: using onnxruntime-gpu")
     else:
         shutil.copy2(args.checkpoint, package_dir / "model" / "model.pth")
         requirements = FULL_REQUIREMENTS
