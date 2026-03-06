@@ -128,7 +128,7 @@ class NoduleDetectorONNX:
         self.preprocessor = CTPreprocessor(config)
 
         inf_config = config.get("inference", {})
-        self.threshold = inf_config.get("threshold", 0.5)
+        self.threshold = inf_config.get("threshold", 0.15)
         self.nms_distance_mm = inf_config.get("nms_distance_mm", 10.0)
         self.batch_size = inf_config.get("batch_size", 64)
 

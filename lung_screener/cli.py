@@ -16,7 +16,10 @@ import yaml
 
 def load_config(config_path: str | None = None) -> dict:
     """Load configuration from YAML file."""
+    # Try next to the package (development layout) then inside the package directory
     default_path = Path(__file__).parent.parent / "config" / "default.yaml"
+    if not default_path.exists():
+        default_path = Path(__file__).parent / "config" / "default.yaml"
 
     config = {}
     if default_path.exists():
