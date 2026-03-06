@@ -279,7 +279,11 @@ async def get_slice_raw(study_id: str, filename: str):
     if not file_path.exists():
         raise HTTPException(404, "File not found")
 
-    pixel_arr, meta = _read_dicom_pixels(file_path)
+    try:
+        pixel_arr, meta = _read_dicom_pixels(file_path)
+    except Exception as exc:
+        logger.warning("Cannot read pixels from %s: %s", file_path, exc)
+        raise HTTPException(500, f"Cannot read DICOM pixels: {exc}") from exc
 
     header = struct.pack(
         "<IIiiffff",
@@ -301,33 +305,43 @@ async def get_slice_raw(study_id: str, filename: str):
 
 
 def _read_dicom_pixels(file_path: Path) -> tuple[np.ndarray, dict]:
-    """Return (int16 pixel array, metadata dict) for a single DICOM file.
+    """Return (int16 HU pixel array, metadata dict) for a single DICOM file.
+
+    Applies RescaleSlope / RescaleIntercept in Python so the returned array
+    is already in Hounsfield Units.  The metadata always has slope=1 and
+    intercept=0, avoiding any uint16→int16 overflow for unsigned DICOM
+    pixel representations.
 
     Tries pydicom first; falls back to SimpleITK for compressed formats.
     """
     try:
         ds = pydicom.dcmread(str(file_path))
-        arr = ds.pixel_array.astype(np.int16)
+        raw = ds.pixel_array  # uint16 or int16 stored values
+        slope = float(getattr(ds, "RescaleSlope", 1.0))
+        intercept = float(getattr(ds, "RescaleIntercept", 0.0))
+        # Apply rescale → HU values; clip to int16 range before cast
+        arr = (raw.astype(np.float32) * slope + intercept).clip(-32768, 32767).astype(np.int16)
         spacing = getattr(ds, "PixelSpacing", [1.0, 1.0])
         return arr, {
             "width": int(ds.Columns),
             "height": int(ds.Rows),
             "min_pixel": int(arr.min()),
             "max_pixel": int(arr.max()),
-            "intercept": float(getattr(ds, "RescaleIntercept", 0)),
-            "slope": float(getattr(ds, "RescaleSlope", 1)),
+            "intercept": 0.0,   # already applied above
+            "slope": 1.0,       # already applied above
             "row_spacing": float(spacing[0]),
             "col_spacing": float(spacing[1]),
         }
     except Exception:
         pass
 
-    # Fallback: SimpleITK handles all compressed transfer syntaxes
+    # Fallback: SimpleITK handles all compressed transfer syntaxes and
+    # automatically applies RescaleSlope/RescaleIntercept → HU values.
     img = sitk.ReadImage(str(file_path))
     arr = sitk.GetArrayFromImage(img)
     if arr.ndim == 3:
         arr = arr[0]
-    arr = arr.astype(np.int16)
+    arr = arr.clip(-32768, 32767).astype(np.int16)
     sp = img.GetSpacing()  # (x, y, z)
     return arr, {
         "width": arr.shape[1],
