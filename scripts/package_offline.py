@@ -48,6 +48,7 @@ ONNX_REQUIREMENTS = [
     "SimpleITK>=2.3",
     "pyyaml>=6.0",
     "click>=8.1",
+    "colorama>=0.4",  # Windows dependency of click; not auto-downloaded on Linux build hosts
 ] + VIEWER_REQUIREMENTS
 
 # Full requirements (includes PyTorch)
