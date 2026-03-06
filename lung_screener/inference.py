@@ -19,9 +19,11 @@ import SimpleITK as sitk
 try:
     import torch
     from torch.cuda.amp import autocast
+    _no_grad = torch.no_grad
 except ImportError:
     torch = None  # type: ignore[assignment]
     autocast = None  # type: ignore[assignment]
+    _no_grad = lambda f: f  # type: ignore[assignment]  # noqa: E731
 
 from .calcification import (
     BENIGN_PATTERNS,
@@ -417,7 +419,7 @@ class NoduleDetector:
             self.model = build_model(config).to(self.device)
         self.model.eval()
 
-    @torch.no_grad()
+    @_no_grad()
     def predict_scan(self, image: sitk.Image, series_uid: str = "") -> ScanResult:
         """Run full detection pipeline on a CT scan.
 
@@ -562,7 +564,7 @@ class NoduleDetector:
                 error_message=str(e),
             )
 
-    @torch.no_grad()
+    @_no_grad()
     def _classify_with_tta(
         self, patches_array: np.ndarray
     ) -> tuple[list[float], list[float], list[int]]:
