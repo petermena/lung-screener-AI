@@ -28,11 +28,13 @@ from .calcification import (
     CalcificationResult,
     analyze_calcification,
 )
-from .model import NODULE_TYPES, build_model
 from .preprocessing import CTPreprocessor, extract_patch
 from .risk_model import compute_lung_rads_with_risk
 
 logger = logging.getLogger(__name__)
+
+# Duplicated from model.py to avoid importing torch at module level
+NODULE_TYPES = ["solid", "part_solid", "ground_glass"]
 
 
 @dataclass
@@ -384,6 +386,7 @@ class NoduleDetector:
         model_path: str | Path | None = None,
         device: str | None = None,
     ):
+        from .model import build_model
         self.config = config
         self.device = torch.device(
             device or ("cuda" if torch.cuda.is_available() else "cpu")
