@@ -263,6 +263,7 @@
       width: 100%; height: 100%;
       pointer-events: none;
     }
+    #overlay-canvas.marking { pointer-events: auto; cursor: crosshair; }
     #overlay-canvas.hidden { display: none; }
 
     #slice-nav {
@@ -413,6 +414,56 @@
       margin-top: 3px;
     }
 
+    .finding-delete {
+      background: none;
+      border: none;
+      color: #6e7681;
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0 2px;
+      line-height: 1;
+      margin-left: 4px;
+    }
+    .finding-delete:hover { color: #f85149; }
+
+    .tool-btn.mark-active { background: #58a6ff; color: #0d1117; }
+
+    #nodule-popup {
+      display: none;
+      position: fixed;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 14px 16px;
+      z-index: 1000;
+      min-width: 200px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      font-size: 13px;
+      color: #c9d1d9;
+    }
+    #nodule-popup label { display: block; margin-bottom: 4px; color: #8b949e; font-size: 11px; }
+    #nodule-popup input, #nodule-popup select {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      border-radius: 4px;
+      padding: 4px 6px;
+      margin-bottom: 10px;
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    #nodule-popup .popup-btns { display: flex; gap: 8px; justify-content: flex-end; }
+    #nodule-popup .popup-btns button {
+      padding: 4px 12px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    #nodule-popup .btn-confirm { background: #238636; color: #fff; }
+    #nodule-popup .btn-cancel  { background: #21262d; color: #c9d1d9; }
+
     #report-container {
       flex: 1;
       display: flex;
@@ -508,6 +559,8 @@
         <button class="tool-btn"        id="btn-pan"     onclick="setActiveTool('Pan')">Pan</button>
         <button class="tool-btn"        id="btn-zoom"    onclick="setActiveTool('Zoom')">Zoom</button>
         <button class="tool-btn"        id="btn-measure" onclick="setActiveTool('Length')">Measure</button>
+        <button class="tool-btn"        id="btn-mark"    onclick="setActiveTool('MarkNodule')" title="Click image to mark a missed nodule">+ Nodule</button>
+        <button class="tool-btn"        id="btn-clear-m" onclick="clearMeasurements()" title="Erase all ruler measurements">✕ Rulers</button>
       </div>
       <div class="tool-group nodule-toggle">
         <label>
@@ -527,6 +580,32 @@
       <canvas id="overlay-canvas" class="hidden"></canvas>
     </div>
 
+    <div id="nodule-popup">
+      <div style="font-weight:600;margin-bottom:10px;font-size:13px;">Add Nodule</div>
+      <label>Diameter (mm)</label>
+      <input type="number" id="popup-diameter" value="6" min="1" max="60" step="0.5">
+      <label>Type</label>
+      <select id="popup-type">
+        <option value="solid">Solid</option>
+        <option value="subsolid">Subsolid / Part-solid</option>
+        <option value="ground_glass">Ground Glass</option>
+        <option value="calcified">Calcified</option>
+      </select>
+      <label>Lobe</label>
+      <select id="popup-lobe">
+        <option value="right upper lobe">Right Upper</option>
+        <option value="right middle lobe">Right Middle</option>
+        <option value="right lower lobe">Right Lower</option>
+        <option value="left upper lobe">Left Upper</option>
+        <option value="left lower lobe">Left Lower</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      <div class="popup-btns">
+        <button class="btn-cancel" onclick="closeNodulePopup()">Cancel</button>
+        <button class="btn-confirm" onclick="confirmAddNodule()">Add</button>
+      </div>
+    </div>
+
     <div id="slice-nav" class="hidden">
       <button class="nav-btn" onclick="changeSlice(-1)">‹</button>
       <input type="range" id="slice-slider" min="0" max="0" value="0">
@@ -539,7 +618,10 @@
   <aside id="right-panel">
     <div id="lungrads-banner"></div>
 
-    <div class="panel-section-title">Findings</div>
+    <div class="panel-section-title" style="display:flex;align-items:center;justify-content:space-between;">
+      Findings
+      <button class="copy-btn" id="btn-save-corrections" onclick="saveCorrections()" style="display:none" title="Save edits to train the model">Save &amp; Train</button>
+    </div>
     <div id="findings-panel">
       <div class="empty-state">No findings yet</div>
     </div>
@@ -571,7 +653,8 @@ cornerstoneWADOImageLoader.configure({ useWebWorkers: false });
 
 cornerstoneTools.external.cornerstone     = cornerstone;
 cornerstoneTools.external.cornerstoneMath = cornerstoneMath;
-cornerstoneTools.init({ showSVGCursors: true });
+// touchEnabled:false skips Hammer.js entirely (not bundled); mouse input is sufficient.
+cornerstoneTools.init({ mouseEnabled: true, touchEnabled: false, showSVGCursors: false });
 
 // ── CUSTOM RAW-SLICE IMAGE LOADER ────────────────────────────────────────────
 // Bypasses cornerstoneWADOImageLoader entirely.  The backend serves a compact
@@ -651,6 +734,7 @@ let currentSeriesUid = null;
 let imageIds         = [];
 let currentIndex     = 0;
 let findings         = [];
+let originalFindings = []; // AI-generated findings before any edits
 let pollingTimer     = null;
 let toolsRegistered  = false;
 let csEnabled        = false;
@@ -778,9 +862,11 @@ async function loadResults() {
     if (rRes.ok) {
       const data = await rRes.json();
       findings = data.findings || [];
+      originalFindings = JSON.parse(JSON.stringify(findings)); // deep-copy for diffing
       renderLungRadsBanner(data.lung_rads_overall);
       renderFindings(findings);
       drawOverlay();
+      document.getElementById('btn-save-corrections').style.display = 'inline-block';
       const n = findings.length;
       setStatus('complete',
         `Complete — LR-${data.lung_rads_overall} — ${n} finding${n !== 1 ? 's' : ''}`);
@@ -826,9 +912,11 @@ async function loadSeriesIntoViewer(seriesArray) {
   slider.max   = imageIds.length - 1;
   slider.value = 0;
 
-  // Enable cornerstone on element (only once — re-enabling corrupts the render loop)
+  // Enable cornerstone on element (only once — re-enabling corrupts the render loop).
+  // Explicitly opt-out of WebGL (CS WAX) — it fails in many headless/GPU-less envs;
+  // Cornerstone's Canvas 2D renderer is reliable and sufficient for grayscale CT.
   if (!csEnabled) {
-    cornerstone.enable(csEl);
+    cornerstone.enable(csEl, { renderer: 'canvas' });
     csEnabled = true;
   }
 
@@ -913,9 +1001,22 @@ document.getElementById('slice-slider').addEventListener('input', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'Escape') {
+    closeNodulePopup();
+    if (isMarkingNodule) setActiveTool('Wwwc');
+    return;
+  }
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === 'ArrowUp'   || e.key === 'ArrowRight') changeSlice(1);
   if (e.key === 'ArrowDown' || e.key === 'ArrowLeft')  changeSlice(-1);
+});
+
+// Click outside popup closes it
+document.addEventListener('mousedown', (e) => {
+  const popup = document.getElementById('nodule-popup');
+  if (popup.style.display === 'block' && !popup.contains(e.target)) {
+    closeNodulePopup();
+  }
 });
 
 // ── WINDOWING ────────────────────────────────────────────────────────────────
@@ -982,17 +1083,101 @@ document.getElementById('wc-slider').addEventListener('input', (e) => {
 
 const TOOL_BTNS = { Wwwc: 'btn-wwwc', Pan: 'btn-pan', Zoom: 'btn-zoom', Length: 'btn-measure' };
 
+let isMarkingNodule = false;
+let pendingNodulePt = null; // { voxel_x, voxel_y, voxel_z }
+
 function setActiveTool(toolName) {
+  // Clear mark-nodule mode
+  isMarkingNodule = false;
+  overlayCanvas.classList.remove('marking');
+  document.getElementById('btn-mark')?.classList.remove('mark-active');
+  closeNodulePopup();
+
   Object.entries(TOOL_BTNS).forEach(([t, id]) => {
     cornerstoneTools.setToolPassive(t);
     document.getElementById(id)?.classList.remove('active');
   });
-  // Always keep mouse-wheel scroll and middle-button pan active
   cornerstoneTools.setToolActive('StackScrollMouseWheel', {});
   cornerstoneTools.setToolActive('Pan', { mouseButtonMask: 4 });
 
+  if (toolName === 'MarkNodule') {
+    isMarkingNodule = true;
+    overlayCanvas.classList.add('marking');
+    document.getElementById('btn-mark')?.classList.add('mark-active');
+    return;
+  }
+
   cornerstoneTools.setToolActive(toolName, { mouseButtonMask: 1 });
   document.getElementById(TOOL_BTNS[toolName])?.classList.add('active');
+}
+
+function clearMeasurements() {
+  if (!csEnabled) return;
+  cornerstoneTools.clearToolState(csEl, 'Length');
+  cornerstone.updateImage(csEl);
+}
+
+// ── MARK NODULE — canvas click handler ───────────────────────────────────────
+
+overlayCanvas.addEventListener('click', function(e) {
+  if (!isMarkingNodule) return;
+  const rect = overlayCanvas.getBoundingClientRect();
+  const canvasPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  const pixelPt  = cornerstone.canvasToPixel(csEl, canvasPt);
+  pendingNodulePt = { voxel_x: Math.round(pixelPt.x), voxel_y: Math.round(pixelPt.y), voxel_z: currentIndex };
+
+  const popup = document.getElementById('nodule-popup');
+  // Position popup near click, keeping it on screen
+  let px = e.clientX + 12, py = e.clientY - 20;
+  if (px + 220 > window.innerWidth)  px = e.clientX - 232;
+  if (py + 280 > window.innerHeight) py = window.innerHeight - 285;
+  popup.style.left = px + 'px';
+  popup.style.top  = py + 'px';
+  popup.style.display = 'block';
+});
+
+function closeNodulePopup() {
+  document.getElementById('nodule-popup').style.display = 'none';
+  pendingNodulePt = null;
+}
+
+function calcLungRads(diameterMm, type) {
+  // Simplified Lung-RADS 1.1 size thresholds for newly added nodules
+  if (type === 'calcified') return '1';
+  if (type === 'ground_glass' || type === 'subsolid') {
+    if (diameterMm < 6)  return '2';
+    if (diameterMm < 30) return '3';
+    return '4A';
+  }
+  // solid
+  if (diameterMm < 6)  return '1';
+  if (diameterMm < 8)  return '3';
+  if (diameterMm < 15) return '4A';
+  return '4B';
+}
+
+function confirmAddNodule() {
+  if (!pendingNodulePt) return;
+  const diameter = parseFloat(document.getElementById('popup-diameter').value) || 6;
+  const type     = document.getElementById('popup-type').value;
+  const lobe     = document.getElementById('popup-lobe').value;
+  const lr       = calcLungRads(diameter, type);
+
+  findings.push({
+    voxel_x:     pendingNodulePt.voxel_x,
+    voxel_y:     pendingNodulePt.voxel_y,
+    voxel_z:     pendingNodulePt.voxel_z,
+    diameter_mm: diameter,
+    nodule_type: type,
+    lobe,
+    lung_rads:   lr,
+    confidence:  1.0,
+    _manual:     true,
+  });
+
+  closeNodulePopup();
+  renderFindings(findings);
+  drawOverlay();
 }
 
 // ── NODULE OVERLAY ────────────────────────────────────────────────────────────
@@ -1026,7 +1211,8 @@ function drawOverlay() {
 
   findings.forEach((f, idx) => {
     const sliceDiff = Math.abs((f.voxel_z || 0) - currentIndex);
-    if (sliceDiff > 3) return;
+    const maxDiff   = f._manual ? 0 : 3;
+    if (sliceDiff > maxDiff) return;
 
     const canvasPt = cornerstone.pixelToCanvas(csEl, { x: f.voxel_x || 0, y: f.voxel_y || 0 });
     const radiusPx = (f.diameter_mm / 2.0) / rowSpacing * vp.scale;
@@ -1082,29 +1268,42 @@ function renderLungRadsBanner(cat) {
   banner.style.display = 'block';
 }
 
+function deleteFinding(origIdx) {
+  findings.splice(origIdx, 1);
+  renderFindings(findings);
+  drawOverlay();
+}
+
 function renderFindings(list) {
   const panel = document.getElementById('findings-panel');
   if (!list.length) {
     panel.innerHTML = '<div class="empty-state">No significant nodules detected</div>';
     return;
   }
-  const sorted = [...list].sort((a, b) => b.diameter_mm - a.diameter_mm);
-  panel.innerHTML = sorted.map((f, i) => {
+  // Sort by size descending but track original index for deletion
+  const indexed = list.map((f, i) => ({ f, i })).sort((a, b) => b.f.diameter_mm - a.f.diameter_mm);
+  panel.innerHTML = indexed.map(({ f, i }, displayNum) => {
     const calcTag = f.calcification?.is_benign
       ? '<div class="benign-tag">✓ Benign calcification pattern</div>' : '';
-    const lrKey = (f.lung_rads || '1').replace('/', '');
+    const lrKey   = (f.lung_rads || '1').replace('/', '');
+    const manualTag = f._manual ? '<div class="benign-tag" style="color:#58a6ff">✎ Manually added</div>' : '';
+    const confLine  = f._manual ? '' : `<div class="finding-detail">Confidence: ${(f.confidence * 100).toFixed(1)}%</div>`;
     return `
     <div class="finding-card"
          style="border-left-color:${lrColor(f.lung_rads)}"
          onclick="jumpToFinding(${f.voxel_z || 0})">
       <div class="finding-header">
-        <span class="finding-num">Nodule ${i + 1}</span>
-        <span class="lr-badge lr-${lrKey}">LR-${f.lung_rads}</span>
+        <span class="finding-num">Nodule ${displayNum + 1}${f._manual ? ' ✎' : ''}</span>
+        <span style="display:flex;align-items:center;gap:4px">
+          <span class="lr-badge lr-${lrKey}">LR-${f.lung_rads}</span>
+          <button class="finding-delete" title="Remove (false positive)"
+                  onclick="event.stopPropagation();deleteFinding(${i})">×</button>
+        </span>
       </div>
       <div class="finding-detail">${capitalize(f.lobe) || 'Location unknown'}</div>
       <div class="finding-detail">${f.diameter_mm} mm &nbsp;·&nbsp; ${fmtType(f.nodule_type)}</div>
-      <div class="finding-detail">Confidence: ${(f.confidence * 100).toFixed(1)}%</div>
-      ${calcTag}
+      ${confLine}
+      ${calcTag}${manualTag}
     </div>`;
   }).join('');
 }
@@ -1165,6 +1364,92 @@ function fmtType(t) {
 
 function capitalize(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+// ── SAVE CORRECTIONS ──────────────────────────────────────────────────────────
+
+async function saveCorrections() {
+  if (!currentStudyId) return;
+
+  const btn = document.getElementById('btn-save-corrections');
+  const origText = btn.textContent;
+  btn.textContent = 'Saving…';
+  btn.disabled = true;
+
+  // Build correction payload:
+  // - AI findings that were deleted → rejected (false positives)
+  // - Current findings that were manually added → new positives
+  // - AI findings that survive → confirmed
+  const aiIds = new Set(originalFindings.map((_, i) => i));
+  const survivingAiIndices = new Set();
+
+  const corrections = [];
+
+  // Walk original AI findings — mark confirmed or rejected
+  originalFindings.forEach((orig, idx) => {
+    // A finding is "surviving" if a current finding has matching voxel coords
+    const stillPresent = findings.some(f =>
+      !f._manual &&
+      Math.abs((f.voxel_x || 0) - (orig.voxel_x || 0)) < 2 &&
+      Math.abs((f.voxel_y || 0) - (orig.voxel_y || 0)) < 2 &&
+      Math.abs((f.voxel_z || 0) - (orig.voxel_z || 0)) < 2
+    );
+    corrections.push({
+      finding_id: orig.finding_id || `ai_${currentStudyId}_${idx}`,
+      series_uid: currentSeriesUid || '',
+      is_manual:  false,
+      confirmed:  stillPresent,
+      ai_x:    orig.voxel_x || 0,
+      ai_y:    orig.voxel_y || 0,
+      ai_z:    orig.voxel_z || 0,
+      ai_diameter_mm: orig.diameter_mm || 0,
+      ai_confidence:  orig.confidence  || 0,
+      ai_lung_rads:   orig.lung_rads   || '1',
+      // Radiologist values = same as AI for confirmed, empty for rejected
+      radiologist_diameter_mm: stillPresent ? (orig.diameter_mm || 0) : 0,
+      radiologist_lung_rads:   stillPresent ? (orig.lung_rads   || '1') : '',
+    });
+  });
+
+  // Walk manually added findings — new positives the AI missed
+  findings.filter(f => f._manual).forEach((f, idx) => {
+    corrections.push({
+      finding_id: `manual_${currentStudyId}_${idx}`,
+      series_uid: currentSeriesUid || '',
+      is_manual:  true,
+      confirmed:  true,
+      ai_x:    f.voxel_x || 0,
+      ai_y:    f.voxel_y || 0,
+      ai_z:    f.voxel_z || 0,
+      ai_diameter_mm: 0,
+      ai_confidence:  0,
+      ai_lung_rads:   '1',
+      radiologist_diameter_mm: f.diameter_mm || 0,
+      radiologist_lung_rads:   f.lung_rads   || '1',
+    });
+  });
+
+  try {
+    const resp = await fetch(`/api/studies/${currentStudyId}/corrections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ series_uid: currentSeriesUid || '', corrections }),
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    const result = await resp.json();
+    btn.textContent = `Saved (${result.recorded} records)`;
+    btn.style.background = '#238636';
+    setTimeout(() => {
+      btn.textContent = origText;
+      btn.style.background = '';
+      btn.disabled = false;
+    }, 3000);
+  } catch (e) {
+    btn.textContent = 'Error — retry';
+    btn.style.background = '#6e2020';
+    btn.disabled = false;
+    console.error('saveCorrections:', e);
+  }
 }
 </script>
 </body>

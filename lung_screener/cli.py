@@ -1250,8 +1250,9 @@ def gradcam(ctx, input_path, model, output, view, num_slices, alpha, max_finding
 @click.option(
     "--checkpoint", "-m",
     required=True,
+    multiple=True,
     type=click.Path(exists=True),
-    help="Model checkpoint (.pth) to load for inference",
+    help="Model checkpoint (.pth). Pass multiple times for k-fold ensemble.",
 )
 @click.option("--host", default="0.0.0.0", show_default=True, help="Host to bind the server to")
 @click.option("--port", default=8080,      show_default=True, help="Port to listen on")
@@ -1276,7 +1277,12 @@ def viewer(ctx, checkpoint, host, port, upload_dir):
     Examples:
       lung-screener viewer -m checkpoints/best.pth
       lung-screener viewer -m checkpoints/best.pth --port 9090
-      lung-screener viewer -m checkpoints/fold_0/best.pth --host 127.0.0.1
+      lung-screener viewer \\
+        -m checkpoints/fold_0/best.pth \\
+        -m checkpoints/fold_1/best.pth \\
+        -m checkpoints/fold_2/best.pth \\
+        -m checkpoints/fold_3/best.pth \\
+        -m checkpoints/fold_4/best.pth
     """
     try:
         import uvicorn
@@ -1297,14 +1303,21 @@ def viewer(ctx, checkpoint, host, port, upload_dir):
     config = ctx.obj["config"]
 
     # Load the detector before starting the server so the first upload is fast
-    checkpoint_path = Path(checkpoint)
-    click.echo(f"Loading model from {checkpoint_path} …")
-    if checkpoint_path.suffix == ".onnx":
+    checkpoint_paths = [Path(c) for c in checkpoint]
+    if len(checkpoint_paths) == 1 and checkpoint_paths[0].suffix == ".onnx":
         from lung_screener.inference_onnx import NoduleDetectorONNX
-        api_module._detector = NoduleDetectorONNX(config, onnx_path=checkpoint_path)
-    else:
+        click.echo(f"Loading ONNX model from {checkpoint_paths[0]} …")
+        api_module._detector = NoduleDetectorONNX(config, onnx_path=checkpoint_paths[0])
+    elif len(checkpoint_paths) == 1:
         from lung_screener.inference import NoduleDetector
-        api_module._detector = NoduleDetector(config, model_path=checkpoint_path)
+        click.echo(f"Loading model from {checkpoint_paths[0]} …")
+        api_module._detector = NoduleDetector(config, model_path=checkpoint_paths[0])
+    else:
+        from lung_screener.inference import EnsembleDetector
+        click.echo(f"Loading {len(checkpoint_paths)}-model ensemble …")
+        for p in checkpoint_paths:
+            click.echo(f"  {p}")
+        api_module._detector = EnsembleDetector(config, model_paths=checkpoint_paths)
 
     upload_path = Path(upload_dir)
     upload_path.mkdir(parents=True, exist_ok=True)
