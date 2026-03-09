@@ -8,7 +8,7 @@ AI-powered lung nodule detection for chest CT scans — with an integrated web v
 
 ## What it does
 
-- Detects and measures lung nodules in chest CT scans with **AUC-ROC 0.985** (5-fold CV)
+- Detects and measures lung nodules in chest CT scans with **AUC-ROC 0.987** (5-fold CV)
 - Assigns **ACR Lung-RADS v2022** categories with type-specific thresholds (solid / part-solid / ground-glass)
 - Generates **dictation-ready radiology reports** — separate from PowerScribe, copy-paste ready
 - Provides an **interactive browser-based DICOM viewer** with windowing, zoom, pan, and measurement tools, with nodule locations marked directly on the images
@@ -254,41 +254,49 @@ Trained on LUNA16 (888 scans) + LUNA25 (~4,000 scans). Evaluated with 5-fold cro
 
 ### 5-fold cross-validation results
 
-| Fold | Best AUC | Best Epoch |
-|------|----------|------------|
-| Fold 0 | 0.9821 | 75 |
-| Fold 1 | 0.9860 | 148 |
-| Fold 2 | 0.9796 | 137 |
-| Fold 3 | **0.9889** | 139 |
-| **Mean** | **0.9842** | — |
+| Fold | AUC-ROC | Sensitivity | Specificity | F1 | ECE | Best Epoch |
+|------|---------|-------------|-------------|-----|-----|------------|
+| Fold 0 | 0.9865 | 100.0% | 80.6% | 0.485 | 0.062 | 149 |
+| Fold 1 | 0.9870 | 99.1% | 87.8% | 0.597 | 0.035 | 149 |
+| Fold 2 | 0.9887 | 99.5% | 87.2% | 0.586 | 0.034 | 143 |
+| Fold 3 | **0.9898** | 99.5% | 87.7% | 0.596 | 0.033 | 147 |
+| Fold 4 | 0.9847 | 97.4% | 88.7% | 0.608 | 0.029 | 136 |
+| **Mean ± Std** | **0.9873 ± 0.0018** | **99.1% ± 0.9%** | **86.4% ± 3.0%** | **0.574 ± 0.045** | **0.039 ± 0.012** | — |
 
-### Overall metrics (single model, epoch 133)
+All metrics at threshold 0.15. Full results: `checkpoints/kfold_eval_summary.json`.
+
+### Overall metrics (mean across 5 folds @ threshold 0.15)
 
 | Metric | Value |
 |--------|-------|
-| AUC-ROC | **0.9817** (95% CI: 0.978–0.985) |
-| Sensitivity | 95.5% @ threshold 0.15 |
-| Specificity | 90.3% @ threshold 0.15 |
-| NPV | 99.1% |
-| ECE (calibration) | 0.045 |
+| AUC-ROC | **0.9873** (95% CI: 0.9846–0.9901) |
+| Sensitivity | **99.1%** (≤ 4.5 missed nodules per fold) |
+| Specificity | 86.4% |
+| Precision (PPV) | 40.6% |
+| NPV | 99.9% |
+| F1 Score | 0.574 |
+| ECE (calibration) | 0.039 |
 
 ### FROC sensitivity
 
-Sensitivity at fixed false-positive rates per scan (lower FP rate = more conservative):
+Sensitivity at fixed false-positive rates per scan (mean ± std across 5 folds):
 
 | FP/scan | 0.0125 | 0.025 | 0.05 | 0.1 | 0.2 | 0.4 |
 |---------|--------|-------|------|-----|-----|-----|
-| Sensitivity | 70.5% | 80.2% | 86.7% | 95.5% | 99.5% | 100% |
+| Sensitivity | 75.5% ± 2.1% | 82.7% ± 2.0% | 92.1% ± 1.6% | 97.9% ± 0.8% | 100% | 100% |
 
 ### Threshold trade-offs
 
+Mean across 5 folds:
+
 | Threshold | Sensitivity | Specificity | Precision |
 |-----------|-------------|-------------|-----------|
-| 0.10 | 97.1% | 87.4% | 37.2% |
-| **0.15** (Youden optimal) | 95.5% | 90.3% | 41.6% |
-| 0.20 | 94.3% | 91.9% | 45.8% |
-| 0.50 | 87.4% | 94.8% | 54.6% |
-| 0.90 | 74.8% | 98.3% | 76.2% |
+| 0.10 | 99.7% | 83.7% | 33.9% |
+| **0.15** (detection threshold) | 99.1% | 86.4% | 40.6% |
+| 0.20 | 97.9% | 89.7% | 47.2% |
+| 0.30 | 94.5% | 93.7% | 58.2% |
+| 0.50 | 78.2% | 98.4% | 82.3% |
+| 0.90 | 40.8% | 99.9% | 97.8% |
 
 ---
 
@@ -349,6 +357,7 @@ scripts/
 ├── package_offline.py      # Bundle everything for air-gapped deployment
 ├── run_kfold_cv.sh         # Launch k-fold training
 ├── inspect_fold_checkpoint.py  # Diagnose k-fold checkpoints
+├── aggregate_kfold_eval.py     # Aggregate per-fold eval results into summary JSON
 └── …
 ```
 

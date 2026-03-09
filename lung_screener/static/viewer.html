@@ -926,7 +926,6 @@ async function loadSeriesIntoViewer(seriesArray) {
     cornerstoneTools.addTool(cornerstoneTools.PanTool);
     cornerstoneTools.addTool(cornerstoneTools.ZoomTool);
     cornerstoneTools.addTool(cornerstoneTools.LengthTool);
-    cornerstoneTools.addTool(cornerstoneTools.StackScrollMouseWheelTool);
     toolsRegistered = true;
   }
 
@@ -937,9 +936,8 @@ async function loadSeriesIntoViewer(seriesArray) {
     imageIds,
   });
 
-  cornerstoneTools.setToolActive('Wwwc',                  { mouseButtonMask: 1 });
-  cornerstoneTools.setToolActive('Pan',                   { mouseButtonMask: 4 });
-  cornerstoneTools.setToolActive('StackScrollMouseWheel', {});
+  cornerstoneTools.setToolActive('Wwwc', { mouseButtonMask: 1 });
+  cornerstoneTools.setToolActive('Pan',  { mouseButtonMask: 4 });
   cornerstoneTools.setToolPassive('Zoom');
   cornerstoneTools.setToolPassive('Length');
 
@@ -999,6 +997,11 @@ function changeSlice(delta) {
 document.getElementById('slice-slider').addEventListener('input', (e) => {
   displaySlice(parseInt(e.target.value));
 });
+
+csEl.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  displaySlice(currentIndex + (e.deltaY > 0 ? 1 : -1));
+}, { passive: false });
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
