@@ -1,70 +1,27 @@
-# Lung Screener AI — Docker Compose Deployment
-#
-# Usage:
-#   docker compose up -d            # Start PACS listener (ONNX, CPU)
-#   docker compose --profile gpu up -d  # Start with GPU support
-#   docker compose logs -f lung-screener  # View logs
-#   docker compose down               # Stop
-#
-# The DICOM SCP listens on port 11112 and processes incoming CT studies.
-# Results are sent back to the configured PACS as Structured Reports.
-
+version: "3.9"
 services:
-  lung-screener:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        MODEL_PATH: ./checkpoints/best.pth
-    image: lung-screener:latest
-    container_name: lung-screener
-    ports:
-      - "11112:11112"
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     volumes:
-      - ./data/incoming:/app/data/incoming
-      - ./data/feedback:/app/data/feedback
-      - ./logs:/app/logs
-    environment:
-      - PYTHONUNBUFFERED=1
-    command: ["serve", "-m", "/app/model/model.onnx"]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost',11112)); s.close()"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+      - ./data:/app/data
+    ports:
+      - "8000:8000"
 
-  lung-screener-gpu:
-    build:
-      context: .
-      dockerfile: Dockerfile.gpu
-      args:
-        MODEL_PATH: ./checkpoints/best.pth
-    image: lung-screener-gpu:latest
-    container_name: lung-screener-gpu
-    ports:
-      - "11112:11112"
-    volumes:
-      - ./data/incoming:/app/data/incoming
-      - ./data/feedback:/app/data/feedback
-      - ./logs:/app/logs
+  ui:
+    build: .
+    command: streamlit run ui/streamlit_app.py --server.address 0.0.0.0 --server.port 8501
     environment:
-      - PYTHONUNBUFFERED=1
-    command: ["serve", "-m", "/app/model/model.pth"]
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost',11112)); s.close()"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    profiles:
-      - gpu
+      - STREAMLIT_SERVER_HEADLESS=true
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+
+  orthanc:
+    image: jodogne/orthanc-plugins:latest
+    ports:
+      - "8042:8042"
+      - "4242:4242"
+    volumes:
+      - ./data/orthanc:/var/lib/orthanc/db

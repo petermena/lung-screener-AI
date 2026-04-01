@@ -1,49 +1,5 @@
-# Python
 __pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-*.egg
-
-# Virtual environments
+*.pyc
 .venv/
-venv/
-env/
-
-# Data (large files)
-data/
-*.nii
-*.nii.gz
-*.mhd
-*.raw
-*.dcm
-
-# Model checkpoints — ignore weights, track metadata only
-checkpoints/*
-!checkpoints/eval_results.json
-!checkpoints/metrics.json
-!checkpoints/dashboard.html
-!checkpoints/calibration.json
-*.pth
-*.pth.tmp
-*.pt
-*.onnx
-.train_lock.json
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-logs/
-*.log
-
-# Config overrides
-config/local.yaml
+data/studies/
+.pytest_cache/
