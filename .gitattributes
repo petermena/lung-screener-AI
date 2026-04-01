@@ -1,0 +1,7 @@
+# Prefer branch (feature) versions for frequently conflicting scaffolding files.
+.gitignore merge=ours
+Dockerfile merge=ours
+README.md merge=ours
+docker-compose.yml merge=ours
+pyproject.toml merge=ours
+tests/test_model.py merge=ours
